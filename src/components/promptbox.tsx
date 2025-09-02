@@ -1,25 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { z } from "zod";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-} from "@/components/ui/card";
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
+import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -29,17 +18,37 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-// Ensure: import "katex/dist/katex.min.css" in app/layout.tsx
+import "katex/dist/katex.min.css";
+
+// Plotly (client only)
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
+import { compile } from "mathjs";
 
 /* ============================== Types & Schema ============================== */
 const formSchema = z.object({
-  prompt: z
-    .string()
-    .min(5, "Tell me the kind of questions to generate (min 5 chars).")
-    .max(300, "Keep it brief (≤300 chars)."),
+  prompt: z.string().min(5).max(300),
   count: z.coerce.number().int().min(1).max(10),
 });
 type FormValues = z.infer<typeof formSchema>;
+
+type GraphSpec =
+  | {
+      kind: "function";
+      title?: string;
+      xLabel?: string;
+      yLabel?: string;
+      expr: string;
+      domain?: [number, number];
+      samples?: number;
+    }
+  | {
+      kind: "points";
+      title?: string;
+      xLabel?: string;
+      yLabel?: string;
+      x: number[];
+      y: number[];
+    };
 
 type QuizItem = {
   id: number;
@@ -47,11 +56,12 @@ type QuizItem = {
   options: { A: string; B: string; C: string; D: string };
   answer: "A" | "B" | "C" | "D";
   explanation_md: string;
+  graph?: GraphSpec;
 };
 
 type ApiResponse =
   | { items?: undefined; raw?: unknown; error?: string }
-  | { items: QuizItem[]; raw?: unknown; validated?: any }
+  | { items: QuizItem[]; raw?: unknown }
   | any;
 
 /* ============================== STEM Detection ============================== */
@@ -61,15 +71,15 @@ const STEM_HELP =
 function isLikelySTEM(s: string): boolean {
   const t = s.toLowerCase();
   const hits = [
-    "math", "maths", "calculus", "algebra", "geometry", "trigonometry", "differentiation", "integration",
-    "limit", "series", "probability", "statistics", "matrix", "vector", "complex number",
-    "physics", "mechanics", "electric", "magnet", "thermo", "optics", "quantum", "kinematics",
-    "chemistry", "stoichiometry", "equilibrium", "acid", "base", "redox", "organic", "bond",
-    "biology", "genetics", "cell", "enzyme", "ecology", "evolution", "physiology",
-    "geology", "earth", "plate tectonics", "seismology", "mineral",
-    "astronomy", "astrophysics", "cosmology", "planet", "orbit",
-    "computer", "algorithm", "data structure", "complexity", "programming", "cs",
-    "engineering", "circuit", "signal", "control", "materials", "mechanical", "electrical",
+    "math","maths","calculus","algebra","geometry","trigonometry","differentiation","integration","limit","series",
+    "probability","statistics","matrix","vector","complex number",
+    "physics","mechanics","electric","magnet","thermo","optics","quantum","kinematics",
+    "chemistry","stoichiometry","equilibrium","acid","base","redox","organic","bond",
+    "biology","genetics","cell","enzyme","ecology","evolution","physiology",
+    "geology","earth","plate tectonics","seismology","mineral",
+    "astronomy","astrophysics","cosmology","planet","orbit",
+    "computer","algorithm","data structure","complexity","programming","cs",
+    "engineering","circuit","signal","control","materials","mechanical","electrical",
   ];
   return hits.some((k) => t.includes(k));
 }
@@ -81,6 +91,56 @@ function MarkdownMath({ content }: { content: string }) {
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
         {content}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+/* =============================== Graph Renderer ============================ */
+function GraphRenderer({ graph }: { graph: GraphSpec }) {
+  // Build x/y
+  const data = useMemo(() => {
+    try {
+      if (graph.kind === "function") {
+        const expr = compile(graph.expr);
+        const [a, b] = graph.domain ?? [-10, 10];
+        const n = graph.samples ?? 300;
+        const xs: number[] = [];
+        const ys: number[] = [];
+        const step = (b - a) / (n - 1);
+        for (let i = 0; i < n; i++) {
+          const x = a + i * step;
+          const y = Number(expr.evaluate({ x }));
+          if (Number.isFinite(y)) {
+            xs.push(x);
+            ys.push(y);
+          }
+        }
+        return [{ x: xs, y: ys, type: "scatter", mode: "lines" as const }];
+      } else {
+        return [{ x: graph.x, y: graph.y, type: "scatter", mode: "markers" as const }];
+      }
+    } catch {
+      return null;
+    }
+  }, [graph]);
+
+  if (!data) return null;
+
+  return (
+    <div className="w-full my-2">
+      <Plot
+        data={data as any}
+        layout={{
+          title: graph.title ?? "",
+          xaxis: { title: graph.xLabel ?? "x" },
+          yaxis: { title: graph.yLabel ?? "y" },
+          margin: { l: 40, r: 20, t: (graph.title ? 40 : 10), b: 40 },
+          autosize: true,
+        }}
+        useResizeHandler
+        style={{ width: "100%", height: "280px" }}
+        config={{ displayModeBar: false, responsive: true }}
+      />
     </div>
   );
 }
@@ -114,18 +174,12 @@ function InteractiveQuiz({
   const goNext = () => { if (!isLast) setIdx((i) => i + 1); };
   const goBack = () => { if (!isFirst) setIdx((i) => i - 1); };
 
-  /* ---------- sizing tokens ---------- */
-  // Fixed desktop width (760px), full width on small screens
-  const WRAP_WIDTH  = "w-full sm:w-[760px]";
-  const CARD_HEIGHT = "h-[720px]";     // total card height
-  const STEM_HEIGHT = "h-[100px]";     // question stem zone
-  const EXPL_HEIGHT = "h-[100px]";     // explanation zone
-  const OPTION_H    = "h-16";          // per-option row height (64px)
-  /* ---------------------------------- */
+  // Fixed desktop width; card height is dynamic now
+  const WRAP_WIDTH = "w-full sm:w-[760px]";
 
   return (
     <div className={`${WRAP_WIDTH} mx-auto space-y-6`}>
-      {/* Top nav (match width) */}
+      {/* Top nav */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Button type="button" variant="outline" onClick={goBack} disabled={isFirst}>
@@ -135,9 +189,7 @@ function InteractiveQuiz({
             Next
           </Button>
         </div>
-        <div className="text-sm font-medium">
-          Q{idx + 1} / {items.length}
-        </div>
+        <div className="text-sm font-medium">Q{idx + 1} / {items.length}</div>
       </div>
 
       {submitted && score && (
@@ -146,19 +198,20 @@ function InteractiveQuiz({
         </div>
       )}
 
-      {/* Fixed-width, fixed-height card */}
-      <Card className={`w-full p-4 border flex flex-col ${CARD_HEIGHT}`}>
-        <div className="shrink-0 mb-2 font-semibold">Question {idx + 1}</div>
+      {/* Dynamic-height card */}
+      <Card className="w-full p-4 border flex flex-col">
+        <div className="mb-2 font-semibold">Question {idx + 1}</div>
 
-        {/* Stem — fixed height; prevent horizontal overflow */}
-        <div className={`shrink-0 mb-3 overflow-auto overflow-x-hidden pr-1 ${STEM_HEIGHT}`}>
-          <div className="break-words [word-break:break-word]">
-            <MarkdownMath content={q.stem_md} />
-          </div>
+        {/* Stem */}
+        <div className="mb-3 break-words [word-break:break-word]">
+          <MarkdownMath content={q.stem_md} />
         </div>
 
-        {/* Options — fill remaining space; each row fixed height */}
-        <div className="flex-1 overflow-auto overflow-x-hidden pr-1">
+        {/* Optional graph */}
+        {q.graph ? <GraphRenderer graph={q.graph} /> : null}
+
+        {/* Options */}
+        <div className="mt-2 space-y-2">
           <RadioGroup
             value={responses[q.id] ?? undefined}
             onValueChange={(v: any) => setAnswer(v)}
@@ -178,19 +231,17 @@ function InteractiveQuiz({
                 <div
                   key={opt}
                   className={[
-                    "flex items-center gap-3 rounded-lg border-2 px-3 transition w-full",
-                    OPTION_H,
+                    "flex items-center gap-3 rounded-lg border-2 px-3 py-3 transition w-full",
                     !submitted ? "hover:border-primary/50" : "",
                     isSelected && !submitted ? "border-primary ring-2 ring-primary/30" : "",
                     isCorrect ? "border-green-600 ring-2 ring-green-300" : "",
                     isWrong   ? "border-red-600 ring-2 ring-red-300" : "",
                   ].join(" ")}
-                  title={content.replace(/\s+/g, " ").trim()}
                 >
                   <RadioGroupItem id={optId} value={opt} className="sr-only" />
                   <Label htmlFor={optId} className="cursor-pointer w-full flex items-center gap-2">
                     <span className="w-6 text-right font-medium">{opt}.</span>
-                    <span className="inline-block align-middle leading-relaxed w-full overflow-hidden text-ellipsis whitespace-normal line-clamp-2 break-words [word-break:break-word]">
+                    <span className="inline-block align-middle leading-relaxed w-full break-words [word-break:break-word]">
                       <MarkdownMath content={content} />
                     </span>
                   </Label>
@@ -200,16 +251,14 @@ function InteractiveQuiz({
           </RadioGroup>
         </div>
 
-        {/* Explanation — fixed height after submit */}
-        {submitted ? (
-          <div className={`shrink-0 mt-3 border-t pt-3 overflow-auto overflow-x-hidden pr-1 ${EXPL_HEIGHT}`}>
+        {/* Explanation after submit */}
+        {submitted && (
+          <div className="mt-4 border-t pt-3">
             <div className="text-sm font-semibold">Correct answer: {q.answer}</div>
             <div className="mt-1 text-sm break-words [word-break:break-word]">
               <MarkdownMath content={q.explanation_md} />
             </div>
           </div>
-        ) : (
-          <div className="shrink-0" />
         )}
       </Card>
 
@@ -225,15 +274,7 @@ function InteractiveQuiz({
       ) : (
         <div className={`${WRAP_WIDTH} flex items-center justify-between`}>
           <div className="flex gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                setSubmitted(false);
-                // keep selections; uncomment to clear:
-                // setResponses({});
-              }}
-            >
+            <Button type="button" variant="outline" onClick={() => setSubmitted(false)}>
               Review again
             </Button>
             <Button
@@ -257,25 +298,16 @@ function InteractiveQuiz({
   );
 }
 
-
-
-/* ======================= Robust client-side extraction ===================== */
+/* ======================= Robust payload → items (unchanged) ====================== */
 function coerceString(v: unknown) {
   if (typeof v === "string") return v;
   try { return JSON.stringify(v ?? ""); } catch { return String(v ?? ""); }
 }
-function tryParseJson<T = any>(s: string): T | undefined {
-  try { return JSON.parse(s); } catch { return undefined; }
-}
-function scrubJsonLike(s: string) {
-  return s.replace(/\uFEFF/g, "").replace(/^[\s`]+|[\s`]+$/g, "");
-}
-function stripTrailingCommas(json: string) {
-  return json.replace(/,\s*([}\]])/g, "$1");
-}
+function tryParseJson<T = any>(s: string) { try { return JSON.parse(s); } catch { return undefined; } }
+function scrubJsonLike(s: string) { return s.replace(/\uFEFF/g, "").replace(/^[\s`]+|[\s`]+$/g, ""); }
+function stripTrailingCommas(json: string) { return json.replace(/,\s*([}\]])/g, "$1"); }
 function extractByFence(text: string) {
-  let m = text.match(/```(?:json|jsonc|javascript|js)?\s*([\s\S]*?)```/i);
-  if (!m) m = text.match(/```+\s*([\s\S]*?)```+/);
+  let m = text.match(/```(?:json|jsonc|javascript|js)?\s*([\s\S]*?)```/i) || text.match(/```+\s*([\s\S]*?)```+/);
   return m?.[1] ? stripTrailingCommas(scrubJsonLike(m[1])) : undefined;
 }
 function extractByBracketMatch(text: string) {
@@ -283,22 +315,11 @@ function extractByBracketMatch(text: string) {
   if (keyIdx < 0) return undefined;
   let start = text.lastIndexOf("{", keyIdx);
   if (start < 0) return undefined;
-
   let i = start, depth = 0, inStr = false, esc = false;
   for (; i < text.length; i++) {
     const ch = text[i];
-    if (inStr) {
-      if (esc) { esc = false; continue; }
-      if (ch === "\\") { esc = true; continue; }
-      if (ch === '"') inStr = false;
-    } else {
-      if (ch === '"') inStr = true;
-      else if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) { i++; break; }
-      }
-    }
+    if (inStr) { if (esc) { esc = false; continue; } if (ch === "\\") { esc = true; continue; } if (ch === '"') inStr = false; }
+    else { if (ch === '"') inStr = true; else if (ch === "{") depth++; else if (ch === "}") { depth--; if (depth === 0) { i++; break; } } }
   }
   if (depth !== 0) return undefined;
   const slice = text.slice(start, i);
@@ -308,9 +329,7 @@ function extractItemsFromPayload(payload: any): QuizItem[] | undefined {
   if (!payload) return;
   if (Array.isArray(payload.items) && payload.items.length) return payload.items;
   if (Array.isArray(payload.questions)) return payload.questions;
-  if (payload.raw && typeof payload.raw === "object" && Array.isArray(payload.raw.questions)) {
-    return payload.raw.questions;
-  }
+  if (payload.raw && typeof payload.raw === "object" && Array.isArray(payload.raw.questions)) return payload.raw.questions;
   if (typeof payload.raw === "string") {
     const full = payload.raw;
     const fenced = extractByFence(full);
@@ -351,27 +370,22 @@ export function PromptBox() {
     defaultValues: { prompt: "", count: 5 },
     mode: "onChange",
   });
+
   const count = form.watch("count");
   const promptValue = form.watch("prompt");
 
-  // Clear STEM error as the user edits (optional heuristic)
   useEffect(() => {
     if (!promptValue) return;
-    // if user starts typing STEM-y content, clear any prior STEM error
-    if (isLikelySTEM(promptValue)) {
-      if (form.formState.errors.prompt?.message === STEM_HELP) {
-        form.clearErrors("prompt");
-      }
+    if (isLikelySTEM(promptValue) && form.formState.errors.prompt?.message === STEM_HELP) {
+      form.clearErrors("prompt");
     }
   }, [promptValue]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function onSubmit(values: FormValues) {
-    // 1) Client-side STEM gate (avoid unnecessary API calls)
     if (!isLikelySTEM(values.prompt)) {
       form.setError("prompt", { type: "manual", message: STEM_HELP });
       return;
     }
-
     try {
       setLoading(true);
       setQuizItems(undefined);
@@ -384,33 +398,20 @@ export function PromptBox() {
       });
 
       if (res.status === 422) {
-        // Server says non-STEM/non-academic
         const data = await res.json();
-        form.setError("prompt", {
-          type: "server",
-          message: data?.error || STEM_HELP,
-        });
+        form.setError("prompt", { type: "server", message: data?.error || STEM_HELP });
         return;
       }
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(errText || `Request failed (${res.status})`);
-      }
+      if (!res.ok) throw new Error(await res.text());
 
       const data: ApiResponse = await res.json();
-
-      // Prefer normalized items
       const items = extractItemsFromPayload(data);
       if (items && items.length) {
         setQuizItems(items);
         setShowForm(false);
         return;
       }
-
-      // Fallback: show raw (and keep form visible)
-      const text = coerceString((data as any)?.raw ?? data ?? "");
-      setRaw(text || "No content returned.");
+      setRaw("No content returned.");
     } catch (err: any) {
       setRaw(`Error: ${err?.message ?? "Something went wrong."}`);
     } finally {
@@ -420,56 +421,46 @@ export function PromptBox() {
 
   return (
     <Form {...form}>
-      {/* ===== Form (hidden once items are generated) ===== */}
       {showForm && (
         <form onSubmit={form.handleSubmit(onSubmit)}>
           <Card className="w-full max-w-2xl p-4 shadow-md bg-white rounded-lg border border-gray-200">
             <CardHeader>
               <CardTitle>Generate STEM Multiple-Choice Questions</CardTitle>
               <CardDescription>
-                Describe the topic/level. We’ll generate multiple-choice (A–D) questions with answers.
+                Describe the topic/level. We’ll generate multiple-choice (A–D) with answers. Some questions may include a graph when helpful.
               </CardDescription>
             </CardHeader>
 
             <div className="px-4 space-y-4">
-                <FormField
+              <FormField
                 control={form.control}
                 name="prompt"
                 render={({ field }) => {
-                    const promptErr = form.formState.errors.prompt?.message;
-                    const isStemError = promptErr === STEM_HELP;
-
-                    return (
+                  const promptErr = form.formState.errors.prompt?.message;
+                  const isStemError = promptErr === STEM_HELP;
+                  return (
                     <FormItem>
-                        <FormLabel>Prompt</FormLabel>
-                        <FormControl>
+                      <FormLabel>Prompt</FormLabel>
+                      <FormControl>
                         <Input
-                            placeholder="e.g., Year 12 calculus — related rates word problems"
-                            {...field}
-                            onChange={(e) => {
+                          placeholder="e.g., Sketching and properties of y = sin(2x) + 0.5"
+                          {...field}
+                          onChange={(e) => {
                             field.onChange(e);
-                            // Clear only the STEM error as the user types
                             if (form.formState.errors.prompt?.message === STEM_HELP) {
-                                form.clearErrors("prompt");
+                              form.clearErrors("prompt");
                             }
-                            }}
-                            className={[
-                            promptErr ? "border-red-500 focus-visible:ring-red-500" : "",
-                            ].join(" ")}
+                          }}
+                          className={[promptErr ? "border-red-500 focus-visible:ring-red-500" : ""].join(" ")}
                         />
-                        </FormControl>
-
-                        {/* Show either Zod/other errors OR our STEM help, not both */}
-                        {!isStemError && <FormMessage />}
-                        {isStemError && (
-                        <p className="text-sm text-red-600 mt-1">{STEM_HELP}</p>
-                        )}
+                      </FormControl>
+                      {!isStemError && <FormMessage />}
+                      {isStemError && <p className="text-sm text-red-600 mt-1">{STEM_HELP}</p>}
                     </FormItem>
-                    );
+                  );
                 }}
-                />
+              />
 
-              {/* Quick suggestions */}
               <div className="flex flex-wrap gap-2">
                 {SUGGESTIONS.map((s) => (
                   <button
@@ -486,7 +477,6 @@ export function PromptBox() {
                 ))}
               </div>
 
-              {/* Count slider */}
               <FormField
                 control={form.control}
                 name="count"
@@ -527,7 +517,6 @@ export function PromptBox() {
         </form>
       )}
 
-      {/* ===== Quiz (only shown once items arrive) ===== */}
       {quizItems && !showForm ? (
         <div className="mt-4">
           <InteractiveQuiz
