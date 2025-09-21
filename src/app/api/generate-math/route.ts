@@ -1,9 +1,47 @@
-// app/api/generate-math/route.ts
 import { NextResponse } from "next/server";
 import OpenAI, { APIError } from "openai";
 import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/* =============================== TAXONOMY =============================== */
+// Keep this small and authoritative. You can move it to lib/taxonomy later.
+const AREAS = [
+  "Mathematics","Physics","Chemistry","Biology","English","Languages","Computer Science"
+] as const;
+type Area = typeof AREAS[number];
+
+const SUBJECTS: Record<Area, string[]> = {
+  Mathematics: ["Algebra","Functions","Calculus","Probability","Statistics","Geometry","Trigonometry"],
+  Physics: ["Mechanics","Waves","Electricity","Modern Physics","Thermodynamics"],
+  Chemistry: ["Stoichiometry","Atomic Structure","Bonding","Thermochemistry","Equilibrium","Acids & Bases","Redox"],
+  Biology: ["Cell Biology","Genetics","Evolution","Human Physiology","Ecology"],
+  English: ["Reading","Writing","Language Analysis","Argument"],
+  Languages: ["Vocabulary","Grammar","Listening","Reading","Writing","Speaking"],
+  "Computer Science": ["Algorithms","Data Structures","Complexity","Programming"],
+};
+
+const TOPICS: Record<string, string[]> = {
+  Algebra: ["Linear Equations","Quadratics","Inequalities","Exponentials","Logs","Polynomials"],
+  Functions: ["Graphing","Transformations","Inverses","Asymptotes"],
+  Calculus: ["Limits","Derivatives","Applications of Derivatives","Integrals","Series","Differential Equations"],
+  Probability: ["Combinatorics","Discrete RVs","Continuous RVs","Bayes","Markov Chains"],
+  Statistics: ["Descriptive","Inference","Regression","Hypothesis Testing"],
+  Geometry: ["Euclidean","Coordinate","Circles","Similarity","Congruence"],
+  Trigonometry: ["Trig Identities","Radian Measure","Graphs","Equations"],
+  // add more as needed
+};
+
+function isValidPath(area: string, subject: string, topic: string) {
+  if (!AREAS.includes(area as Area)) return false;
+  const sOK = SUBJECTS[area as Area]?.includes(subject);
+  const tOK = TOPICS[subject]?.includes(topic);
+  return Boolean(sOK && tOK);
+}
+
+/* =============================== Types =============================== */
 
 type QuestionItem = {
   id: number;
@@ -17,13 +55,19 @@ type QuestionItem = {
     xLabel?: string;
     yLabel?: string;
     // function plot
-    expr?: string;                 // e.g., "sin(x) + x^2"
-    domain?: [number, number];     // e.g., [-2*Math.PI, 2*Math.PI]
-    samples?: number;              // e.g., 300
+    expr?: string;
+    domain?: [number, number];
+    samples?: number;
     // points plot
     x?: number[];
     y?: number[];
   };
+  // NEW classification fields
+  area: Area;
+  subject: string;
+  topic: string;
+  skillIds?: string[];
+  difficulty?: number; // 1..5
 };
 
 /* =============================== MCQ SCHEMAS =============================== */
@@ -49,23 +93,29 @@ const Z_GRAPH_POINTS = z.object({
 
 const Z_GRAPH = z.union([Z_GRAPH_FN, Z_GRAPH_POINTS]);
 
+const Z_MCQ_QUESTION = z.object({
+  id: z.number().int(),
+  stem_md: z.string(),
+  options: z.object({
+    A: z.string(),
+    B: z.string(),
+    C: z.string(),
+    D: z.string(),
+  }),
+  answer: z.enum(["A", "B", "C", "D"]),
+  explanation_md: z.string(),
+  graph: Z_GRAPH.optional(),
+  // NEW classification fields (validated later against taxonomy)
+  area: z.enum(AREAS),
+  subject: z.string(),
+  topic: z.string(),
+  skillIds: z.array(z.string()).optional(),
+  difficulty: z.number().int().min(1).max(5).optional(),
+});
+
 const Z_MCQ = z.object({
   version: z.literal(1),
-  questions: z.array(
-    z.object({
-      id: z.number().int(),
-      stem_md: z.string(),
-      options: z.object({
-        A: z.string(),
-        B: z.string(),
-        C: z.string(),
-        D: z.string(),
-      }),
-      answer: z.enum(["A", "B", "C", "D"]),
-      explanation_md: z.string(),
-      graph: Z_GRAPH.optional(),
-    })
-  ),
+  questions: z.array(Z_MCQ_QUESTION),
 });
 
 const MCQ_JSON_SCHEMA = {
@@ -130,8 +180,14 @@ const MCQ_JSON_SCHEMA = {
               },
             ],
           },
+          // NEW classification in JSON schema
+          area: { type: "string", enum: [...AREAS] },
+          subject: { type: "string" },
+          topic: { type: "string" },
+          skillIds: { type: "array", items: { type: "string" } },
+          difficulty: { type: "integer", minimum: 1, maximum: 5 },
         },
-        required: ["id", "stem_md", "options", "answer", "explanation_md"],
+        required: ["id", "stem_md", "options", "answer", "explanation_md", "area", "subject", "topic"],
       },
     },
   },
@@ -178,7 +234,7 @@ Prompt:
   try { return JSON.parse((resp as any).output_text || "{}"); } catch { return undefined; }
 }
 
-/* ============================== Helpers (unchanged) ============================== */
+/* ============================== Helpers (unchanged+small tweaks) ============================== */
 
 function getOutputText(resp: any) {
   if (resp?.output_text) return resp.output_text as string;
@@ -229,20 +285,36 @@ function normalizeItems(json: any): QuestionItem[] | undefined {
     answer: (String(q?.answer ?? "A").toUpperCase() as "A" | "B" | "C" | "D"),
     explanation_md: String(q?.explanation_md ?? "").trim(),
     graph: q?.graph,
-  }));
+    area: (q?.area ?? "Mathematics") as Area,
+    subject: String(q?.subject ?? "Algebra"),
+    topic: String(q?.topic ?? "Linear Equations"),
+    skillIds: Array.isArray(q?.skillIds) ? q.skillIds.map((s: any) => String(s)) : undefined,
+    difficulty: Number.isFinite(q?.difficulty) ? Number(q.difficulty) : undefined,
+  })).filter((q: { area: string; subject: string; topic: string; }) => isValidPath(q.area, q.subject, q.topic)); // drop invalid paths defensively
 }
 
 /* ================================= Handler ================================= */
-
 export async function POST(req: Request) {
   try {
-    const { prompt, count } = (await req.json()) as { prompt?: string; count?: number };
+    // The client sends these (PromptBox does it in the previous step)
+    const body = (await req.json()) as {
+      prompt?: string;
+      count?: number;
+      authUserId?: string;   // Supabase user ID
+      area?: string;         // optional taxonomy hints
+      subject?: string;
+      topic?: string;
+    };
+
+    const prompt = body?.prompt;
+    const count = body?.count;
     const n = Number.isFinite(count) ? Math.max(1, Math.min(10, Number(count))) : 5;
 
     if (!prompt || prompt.trim().length < 5) {
       return NextResponse.json({ error: "Please provide a brief description (≥5 chars)." }, { status: 400 });
     }
 
+    // --- STEM gate ---
     let allow = quickIsLikelySTEM(prompt);
     if (!allow) {
       const cls = await classifyPromptWithModel(prompt);
@@ -251,22 +323,50 @@ export async function POST(req: Request) {
       }
     }
     if (!allow) {
-      return NextResponse.json(
-        { error: "This endpoint only accepts academic STEM prompts." },
-        { status: 422 }
-      );
+      return NextResponse.json({ error: "This endpoint only accepts academic STEM prompts." }, { status: 422 });
     }
 
-    // 1) Generate (encourage fenced JSON + optional graph)
+    // --- Generation prompt (same shape you already had) ---
     const system =
       "You are a careful STEM tutor. Generate high-quality multiple-choice (A–D) questions. " +
       "Use Markdown/LaTeX inside strings. Keep explanations brief (1–3 lines). " +
-      'If a simple plot would help (e.g., function shape, trig wave, parabola), include an optional "graph" object.';
+      'If a simple plot would help, include an optional "graph" object. ' +
+      "Every question MUST include classification fields: area, subject, topic, and SHOULD include skillIds and difficulty when reasonable. " +
+      `Allowed areas: ${AREAS.join(", ")}. Subjects must belong to area; topics must belong to subject.`;
+
+    const schemaSnippet =
+`Return a fenced JSON object EXACTLY like:
+{
+  "version": 1,
+  "questions": [
+    {
+      "id": 1,
+      "stem_md": "...",
+      "options": {"A":"...","B":"...","C":"...","D":"..."},
+      "answer":"A",
+      "explanation_md":"...",
+      "graph": { "kind":"function","expr":"sin(x)","domain":[-6.283,6.283],"samples":300,"title":"y = sin(x)","xLabel":"x","yLabel":"y" },
+      "area": "Mathematics",
+      "subject": "Calculus",
+      "topic": "Derivatives",
+      "skillIds": ["calculus.derivative.rules"],
+      "difficulty": 3
+    }
+  ]
+}`;
+
+    const taxonomySnippet =
+`Authoritative taxonomy:
+AREAS = ${JSON.stringify(AREAS)}
+SUBJECTS = ${JSON.stringify(SUBJECTS)}
+TOPICS = ${JSON.stringify(TOPICS)}`;
+
     const userContent =
       `Generate exactly ${n} multiple-choice questions for:\n“${prompt.trim()}”.\n\n` +
-      `Return a fenced JSON object FIRST with shape:\n` +
-      `{\n  "version": 1,\n  "questions": [\n    {\n      "id": 1,\n      "stem_md": "...",\n      "options": {"A":"...","B":"...","C":"...","D":"..."},\n      "answer":"A",\n      "explanation_md":"...",\n      "graph": { // OPTIONAL, only if helpful\n        "kind": "function", "expr": "sin(x)", "domain": [-6.283, 6.283], "samples": 300, "title": "y = sin(x)", "xLabel":"x", "yLabel":"y"\n        // or\n        // "kind": "points", "x":[...], "y":[...], "title":"...", "xLabel":"...", "yLabel":"..."\n      }\n    }\n  ]\n}\n` +
-      `After the JSON you MAY include a readable Markdown copy for humans.`;
+      `${taxonomySnippet}\n\n` +
+      `${schemaSnippet}\n\n` +
+      `Only include topics that exist in the taxonomy for the chosen subject. ` +
+      `Return the fenced JSON FIRST. After the JSON you MAY include a readable Markdown copy for humans.`;
 
     const gen = await client.responses.create({
       model: "o4-mini",
@@ -279,21 +379,80 @@ export async function POST(req: Request) {
 
     const rawText = getOutputText(gen);
 
-    // 1a) Local extract + validate
+    // --- local extract + validate ---
     const extracted = extractQuestionsFromText(rawText);
     const localParsed = extracted ?? tryParseJson(rawText);
     const localCheck = localParsed ? Z_MCQ.safeParse(localParsed) : ({ success: false } as const);
 
+    // Helper: persist + build links back to created rows
+    const maybePersist = async (items: QuestionItem[]) => {
+      const authUserId = body?.authUserId?.trim();
+      if (!authUserId) return { links: [] as Array<{ localId: number; questionId: string; attemptId: string; answer: "A"|"B"|"C"|"D" }> };
+
+      const student = await prisma.student.findUnique({
+        where: { authUserId },
+        select: { id: true },
+      });
+      if (!student) return { links: [] };
+
+      const links: Array<{ localId: number; questionId: string; attemptId: string; answer: "A"|"B"|"C"|"D" }> = [];
+
+      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        for (const it of items) {
+          // Create the Question (store classification + difficulty)
+          const q = await tx.question.create({
+            data: {
+              prompt: it.stem_md.slice(0, 5000),
+              area: it.area,
+              subject: it.subject,
+              topic: it.topic,
+              difficulty: it.difficulty ?? null,
+            },
+            select: { id: true },
+          });
+
+          // Create the Attempt as a pending result (correct=false until the student submits)
+          const a = await tx.attempt.create({
+            data: {
+              studentId: student.id,
+              questionId: q.id,
+              correct: false,                // will be updated on submit
+              skillIds: it.skillIds ?? [],
+              difficulty: it.difficulty ?? null,
+              timeTakenMs: null,
+              area: it.area,
+              subject: it.subject,
+              topic: it.topic,
+            },
+            select: { id: true },
+          });
+
+          // Return linkage + the expected answer so client can check on submit
+          links.push({ localId: it.id, questionId: q.id, attemptId: a.id, answer: it.answer });
+        }
+      });
+
+      return { links };
+    };
+
+    // Fast path – local JSON is valid and taxonomy-compliant
     if (localCheck.success && localParsed!.questions.length === n) {
-      const items = normalizeItems(localParsed);
-      if (items?.length) return NextResponse.json({ items });
+      const allValid = localParsed!.questions.every((q: any) => isValidPath(q.area, q.subject, q.topic));
+      if (allValid) {
+        const items = normalizeItems(localParsed) ?? [];
+        if (items.length) {
+          const { links } = await maybePersist(items);
+          return NextResponse.json({ items, links });
+        }
+      }
     }
 
-    // 2) Model validate/repair to schema (pure JSON)
+    // --- Repair/validate with model if needed ---
     const validatorPrompt =
-      `Validate/repair the following into STRICT JSON that matches this schema. ` +
-      `Include "graph" only when present in the content or clearly helpful.\n\n` +
+      `Validate/repair the following into STRICT JSON that matches this schema and taxonomy. ` +
+      `Reject/adjust any subject/topic that is outside the taxonomy by mapping to the closest valid one.\n\n` +
       `SCHEMA:\n${JSON.stringify(MCQ_JSON_SCHEMA, null, 2)}\n\n` +
+      `TAXONOMY:\nAREAS=${JSON.stringify(AREAS)}\nSUBJECTS=${JSON.stringify(SUBJECTS)}\nTOPICS=${JSON.stringify(TOPICS)}\n\n` +
       `ORIGINAL OUTPUT:\n${rawText}\n\n` +
       (localParsed ? `PARTIAL JSON:\n${JSON.stringify(localParsed).slice(0, 4000)}\n` : ``);
 
@@ -309,9 +468,16 @@ export async function POST(req: Request) {
 
     if (finalCheck.success) {
       const fixed = { ...valJson } as any;
-      if (Array.isArray(fixed.questions)) fixed.questions = fixed.questions.slice(0, n);
-      const items = normalizeItems(fixed);
-      if (items?.length) return NextResponse.json({ items });
+      if (Array.isArray(fixed.questions)) {
+        fixed.questions = fixed.questions
+          .slice(0, n)
+          .filter((q: any) => isValidPath(q.area, q.subject, q.topic));
+      }
+      const items = normalizeItems(fixed) ?? [];
+      if (items.length) {
+        const { links } = await maybePersist(items);
+        return NextResponse.json({ items, links });
+      }
     }
 
     return NextResponse.json({ error: "Could not normalize output to schema." }, { status: 200 });

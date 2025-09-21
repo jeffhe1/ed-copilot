@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Student {
+  id           String         @id @default(dbgenerated("(gen_random_uuid())::text"))
+  name         String
+  email        String         @unique
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @default(now()) @updatedAt
+  authUserId   String?        @unique @db.Uuid
+  attempts     Attempt[]
+  classEnrolls Enrollment[]
+  mastery      SkillMastery[]
+}
+
+model Teacher {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  classes   Class[]
+}
+
+model Class {
+  id        String       @id @default(cuid())
+  name      String
+  teacherId String
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  teacher   Teacher      @relation(fields: [teacherId], references: [id])
+  enrolls   Enrollment[]
+  questions Question[]
+}
+
+model Enrollment {
+  id        String  @id @default(cuid())
+  studentId String
+  classId   String
+  klass     Class   @relation(fields: [classId], references: [id])
+  student   Student @relation(fields: [studentId], references: [id])
+
+  @@unique([studentId, classId])
+}
+
+model Question {
+  id         String          @id @default(cuid())
+  prompt     String
+  area       String
+  subject    String
+  topic      String
+  difficulty Int?
+  createdAt  DateTime        @default(now())
+  classId    String?
+  Attempt    Attempt[]
+  Class      Class?          @relation(fields: [classId], references: [id])
+  qSkills    QuestionSkill[]
+
+  @@index([area, subject, topic])
+}
+
+model Skill {
+  id          String          @id
+  name        String
+  description String?
+  qSkills     QuestionSkill[]
+  mastery     SkillMastery[]
+}
+
+model QuestionSkill {
+  questionId String
+  skillId    String
+  question   Question @relation(fields: [questionId], references: [id])
+  skill      Skill    @relation(fields: [skillId], references: [id])
+
+  @@id([questionId, skillId])
+}
+
+model Attempt {
+  id          String   @id @default(cuid())
+  studentId   String
+  questionId  String
+  correct     Boolean
+  skillIds    String[]
+  difficulty  Int?
+  timeTakenMs Int?
+  createdAt   DateTime @default(now())
+  area        String
+  subject     String
+  topic       String
+  question    Question @relation(fields: [questionId], references: [id])
+  student     Student  @relation(fields: [studentId], references: [id])
+
+  @@index([studentId, createdAt])
+  @@index([questionId])
+  @@index([createdAt])
+}
+
+model SkillMastery {
+  id         String   @id @default(cuid())
+  studentId  String
+  skillId    String
+  mastery    Float
+  n          Int
+  lastSeenAt DateTime @default(now())
+  skill      Skill    @relation(fields: [skillId], references: [id])
+  student    Student  @relation(fields: [studentId], references: [id])
+
+  @@unique([studentId, skillId])
+  @@index([skillId])
+}

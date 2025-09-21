@@ -1,408 +1,437 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { z } from "zod";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import Markdown from "@/components/Markdown";
 
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-} from "@/components/ui/card";
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-  import { Slider } from "@/components/ui/slider";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Label } from "@/components/ui/label";
+/* ============================ Types (mirror your API schema) ============================ */
 
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-// Make sure: import "katex/dist/katex.min.css" in app/layout.tsx
+type GraphFn = {
+  kind: "function";
+  title?: string;
+  xLabel?: string;
+  yLabel?: string;
+  expr: string;
+  domain?: [number, number];
+  samples?: number; // 10..2000
+};
 
-// ---------- Types ----------
-const formSchema = z.object({
-  prompt: z.string().min(5, "Tell me the kind of math questions to generate (min 5 chars).").max(300),
-  count: z.coerce.number().int().min(1).max(10),
-});
-type FormValues = z.infer<typeof formSchema>;
+type GraphPoints = {
+  kind: "points";
+  title?: string;
+  xLabel?: string;
+  yLabel?: string;
+  x: number[];
+  y: number[];
+};
 
-type QuizItem = {
-  id: number;
+type QuestionItem = {
+  id: number; // local id from the generator
   stem_md: string;
   options: { A: string; B: string; C: string; D: string };
   answer: "A" | "B" | "C" | "D";
   explanation_md: string;
+  graph?: GraphFn | GraphPoints;
+  area: string;     // "Mathematical Methods" | "Specialist Mathematics" | ...
+  subject: string;  // e.g., "Calculus"
+  topic: string;    // e.g., "Derivatives"
+  skillIds?: string[];
+  difficulty?: number;
 };
 
-type ApiResponse =
-  | { items?: undefined; raw: unknown }
-  | { items: QuizItem[]; raw?: unknown }
-  | any;
+type Linkage = {
+  localId: number;      // matches QuestionItem.id
+  questionId: string;   // DB id (Prisma)
+  attemptId: string;    // DB id (Prisma)
+  answer: "A" | "B" | "C" | "D";
+};
 
-// ---------- Markdown+Math ----------
-function MarkdownMath({ content }: { content: string }) {
+type QuizPacket = {
+  items: QuestionItem[];
+  links?: Linkage[];
+  prompt: string;
+  meta?: { createdAt: number; count: number };
+};
+
+/* ============================ Small helpers ============================ */
+
+function classNames(...xs: Array<string | null | false | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function EmptyState() {
   return (
-    <div className="space-y-2 leading-relaxed">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-        {content}
-      </ReactMarkdown>
+    <div className="rounded-xl border p-6 text-center text-gray-600">
+      Generate questions with the prompt box to start an interactive quiz.
     </div>
   );
 }
 
-// ---------- Interactive Quiz ----------
-function InteractiveQuiz({
-  items,
-  onNewPrompt,
-}: {
-  items: QuizItem[];
-  onNewPrompt: () => void;
-}) {
-  const [responses, setResponses] = useState<Record<number, "A" | "B" | "C" | "D" | undefined>>({});
-  const [submitted, setSubmitted] = useState(false);
+/* ============================ Safe tiny math evaluator for function plots ============================ */
+/** Very conservative sanitizer: allow digits, whitespace, x, arithmetic ops, parentheses, commas,
+ * and a whitelist of Math.* identifiers. Also convert ^ to ** for exponentiation. */
+const SAFE_TOKENS =
+  /^(?:[0-9.\s()+\-*/,%]|x|PI|E|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|log|sqrt|abs|floor|ceil|round|min|max|pow)+$/i;
 
-  const score = useMemo(() => {
-    if (!submitted) return null;
-    let correct = 0;
-    for (const q of items) if (responses[q.id] === q.answer) correct++;
-    return { correct, total: items.length };
-  }, [submitted, responses, items]);
+function buildSafeFn(exprRaw: string): ((x: number) => number) | null {
+  const expr = exprRaw.replace(/\^/g, "**").trim();
+  if (!expr || !SAFE_TOKENS.test(expr.replace(/[A-Za-z]+/g, (m) => m))) {
+    return null;
+  }
+  try {
+    // eslint-disable-next-line no-new-func
+    const f = new Function(
+      "x",
+      `
+      const {PI,E,sin,cos,tan,asin,acos,atan,atan2,sinh,cosh,tanh,exp,log,sqrt,abs,floor,ceil,round,min,max,pow} = Math;
+      return (${expr});
+    `
+    );
+    // quick probe
+    // @ts-ignore
+    const test = f(0);
+    if (Number.isFinite(test)) {
+      // @ts-ignore
+      return (x: number) => {
+        const y = f(x);
+        return Number.isFinite(y) ? (y as number) : NaN;
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/* ============================ SVG Plotters ============================ */
+
+function PointsPlot({ g }: { g: GraphPoints }) {
+  const { x, y, title, xLabel, yLabel } = g;
+  if (!Array.isArray(x) || !Array.isArray(y) || x.length === 0 || y.length === 0 || x.length !== y.length) {
+    return null;
+  }
+  const minX = Math.min(...x), maxX = Math.max(...x);
+  const minY = Math.min(...y), maxY = Math.max(...y);
+  const pad = 24, W = 560, H = 260;
+
+  const sx = (vx: number) => pad + ((vx - minX) / (maxX - minX || 1)) * (W - 2 * pad);
+  const sy = (vy: number) => H - pad - ((vy - minY) / (maxY - minY || 1)) * (H - 2 * pad);
 
   return (
-    <div className="space-y-6">
-      {submitted && score && (
-        <div className="rounded-md border p-3 font-medium">Score: {score.correct}/{score.total}</div>
-      )}
-
-      {items.map((q, idx) => {
-        const chosen = responses[q.id];
-
-        return (
-          <Card key={q.id} className="p-4 border">
-            <div className="mb-3 font-semibold">Q{idx + 1}</div>
-            <div className="mb-4">
-              <MarkdownMath content={q.stem_md} />
-            </div>
-
-            <RadioGroup
-              value={chosen ?? undefined}
-              onValueChange={(v: any) => setResponses((prev) => ({ ...prev, [q.id]: v }))}
-              className="space-y-2"
-              disabled={submitted}
-            >
-              {(["A", "B", "C", "D"] as const).map((opt) => {
-                const optId = `q${q.id}-${opt}`;
-                const content = q.options[opt];
-
-                const isSelected = chosen === opt;
-                const isCorrect = submitted && q.answer === opt;
-                const isWrong = submitted && chosen === opt && chosen !== q.answer;
-
-                return (
-                  <div
-                    key={opt}
-                    className={[
-                      "flex items-start gap-3 rounded-lg border-2 p-3 transition",
-                      !submitted ? "hover:border-primary/50" : "",
-                      isSelected && !submitted ? "border-primary ring-2 ring-primary/30" : "",
-                      isCorrect ? "border-green-600 ring-2 ring-green-300" : "",
-                      isWrong ? "border-red-600 ring-2 ring-red-300" : "",
-                    ].join(" ")}
-                  >
-                    {/* keep radio for a11y/keyboard, hide the dot */}
-                    <RadioGroupItem id={optId} value={opt} className="sr-only" />
-                    <Label htmlFor={optId} className="cursor-pointer w-full">
-                      <span className="font-medium mr-2">{opt}.</span>
-                      <span className="inline-block align-middle">
-                        <MarkdownMath content={content} />
-                      </span>
-                    </Label>
-                  </div>
-                );
-              })}
-            </RadioGroup>
-
-            {submitted && (
-              <div className="mt-4">
-                <div className="text-sm font-semibold">Correct answer: {q.answer}</div>
-                <div className="mt-1 text-sm">
-                  <MarkdownMath content={q.explanation_md} />
-                </div>
-              </div>
-            )}
-          </Card>
-        );
-      })}
-
-      <div className="flex gap-3">
-        {!submitted ? (
-          <Button type="button" onClick={() => setSubmitted(true)} disabled={items.length === 0}>
-            Submit
-          </Button>
-        ) : (
-          <>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                setSubmitted(false);
-                setResponses({});
-              }}
-            >
-              Reset answers
-            </Button>
-            <Button type="button" variant="ghost" onClick={onNewPrompt}>
-              New prompt
-            </Button>
-          </>
+    <div className="mt-3 rounded-lg border bg-white p-3">
+      {title && <div className="mb-2 text-sm font-medium">{title}</div>}
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="block">
+        {/* Axes */}
+        <line x1={pad} y1={H - pad} x2={W - pad} y2={H - pad} stroke="currentColor" strokeWidth="1" />
+        <line x1={pad} y1={pad} x2={pad} y2={H - pad} stroke="currentColor" strokeWidth="1" />
+        {/* Points */}
+        {x.map((vx, i) => (
+          <circle key={i} cx={sx(vx)} cy={sy(y[i])} r={3} />
+        ))}
+        {/* Labels */}
+        {xLabel && (
+          <text x={W - pad} y={H - 6} fontSize="10" textAnchor="end">
+            {xLabel}
+          </text>
         )}
+        {yLabel && (
+          <text x={10} y={pad} fontSize="10" textAnchor="start">
+            {yLabel}
+          </text>
+        )}
+      </svg>
+    </div>
+  );
+}
+
+function FunctionPlot({ g }: { g: GraphFn }) {
+  const { expr, title, xLabel, yLabel } = g;
+  const domain = g.domain ?? [-10, 10];
+  const samples = Math.max(10, Math.min(2000, g.samples ?? 300));
+  const pad = 24, W = 560, H = 260;
+
+  const safeFn = buildSafeFn(expr);
+  if (!safeFn) {
+    return (
+      <div className="mt-3 rounded-lg border bg-white p-3 text-sm text-gray-600">
+        <div className="font-medium mb-1">{title ?? "Function plot"}</div>
+        <div>Expression: <code>{expr}</code></div>
+        <div className="text-xs mt-1">Unable to plot (expression not supported).</div>
+      </div>
+    );
+  }
+
+  // sample points
+  const xs: number[] = [];
+  const ys: number[] = [];
+  const [x0, x1] = domain;
+  for (let i = 0; i <= samples; i++) {
+    const x = x0 + (i * (x1 - x0)) / samples;
+    const y = safeFn(x);
+    if (Number.isFinite(y)) {
+      xs.push(x);
+      ys.push(y);
+    } else {
+      // NaN: push a break marker via nulls
+      xs.push(Number.NaN);
+      ys.push(Number.NaN);
+    }
+  }
+
+  // bounds
+  const finiteYs = ys.filter((v) => Number.isFinite(v));
+  const minX = x0, maxX = x1;
+  const minY = finiteYs.length ? Math.min(...finiteYs) : -1;
+  const maxY = finiteYs.length ? Math.max(...finiteYs) : 1;
+  const yspan = maxY - minY || 1;
+
+  const sx = (vx: number) => pad + ((vx - minX) / (maxX - minX || 1)) * (W - 2 * pad);
+  const sy = (vy: number) => H - pad - ((vy - minY) / yspan) * (H - 2 * pad);
+
+  // build polyline segments, breaking on NaNs
+  const segments: Array<[number, number][]> = [];
+  let current: Array<[number, number]> = [];
+  for (let i = 0; i < xs.length; i++) {
+    const vx = xs[i], vy = ys[i];
+    if (Number.isFinite(vx) && Number.isFinite(vy)) {
+      current.push([sx(vx), sy(vy)]);
+    } else if (current.length) {
+      segments.push(current);
+      current = [];
+    }
+  }
+  if (current.length) segments.push(current);
+
+  return (
+    <div className="mt-3 rounded-lg border bg-white p-3">
+      {title && <div className="mb-2 text-sm font-medium">{title}</div>}
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="block">
+        {/* Axes */}
+        <line x1={pad} y1={H - pad} x2={W - pad} y2={H - pad} stroke="currentColor" strokeWidth="1" />
+        <line x1={pad} y1={pad} x2={pad} y2={H - pad} stroke="currentColor" strokeWidth="1" />
+        {/* Curve segments */}
+        {segments.map((seg, i) => (
+          <polyline
+            key={i}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            points={seg.map(([X, Y]) => `${X},${Y}`).join(" ")}
+          />
+        ))}
+        {/* Labels */}
+        {xLabel && (
+          <text x={W - pad} y={H - 6} fontSize="10" textAnchor="end">
+            {xLabel}
+          </text>
+        )}
+        {yLabel && (
+          <text x={10} y={pad} fontSize="10" textAnchor="start">
+            {yLabel}
+          </text>
+        )}
+      </svg>
+      <div className="mt-1 text-xs text-gray-600">
+        Expr: <code>{expr}</code> · Domain: {domain[0]} to {domain[1]} · Samples: {samples}
       </div>
     </div>
   );
 }
 
-// ---------- JSON extraction utils ----------
-function coerceString(v: unknown) {
-  if (typeof v === "string") return v;
-  try { return JSON.stringify(v ?? ""); } catch { return String(v ?? ""); }
-}
-function tryParseJson<T = any>(s: string): T | undefined {
-  try { return JSON.parse(s); } catch { return undefined; }
-}
-function scrubJsonLike(s: string) {
-  return s.replace(/\uFEFF/g, "").replace(/^[\s`]+|[\s`]+$/g, "");
-}
-function stripTrailingCommas(json: string) {
-  return json.replace(/,\s*([}\]])/g, "$1");
-}
-function extractByFence(text: string) {
-  let m = text.match(/```(?:json|jsonc|javascript|js)?\s*([\s\S]*?)```/i);
-  if (!m) m = text.match(/```+\s*([\s\S]*?)```+/);
-  return m?.[1] ? stripTrailingCommas(scrubJsonLike(m[1])) : undefined;
-}
-function extractByBracketMatch(text: string) {
-  const keyIdx = text.search(/"questions"\s*:/);
-  if (keyIdx < 0) return undefined;
-  let start = text.lastIndexOf("{", keyIdx);
-  if (start < 0) return undefined;
+/* ============================ Main Quiz ============================ */
 
-  let i = start, depth = 0, inStr = false, esc = false;
-  for (; i < text.length; i++) {
-    const ch = text[i];
-    if (inStr) {
-      if (esc) { esc = false; continue; }
-      if (ch === "\\") { esc = true; continue; }
-      if (ch === '"') inStr = false;
-    } else {
-      if (ch === '"') inStr = true;
-      else if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) { i++; break; }
-      }
+export default function InteractiveQuiz() {
+  const [packet, setPacket] = useState<QuizPacket | null>(null);
+  const [index, setIndex] = useState(0);
+  const [chosen, setChosen] = useState<"A" | "B" | "C" | "D" | null>(null);
+  const [revealed, setRevealed] = useState(false);
+
+  // Map localId -> linkage for analytics (if provided)
+  const linkageMap = useMemo(() => {
+    const m = new Map<number, Linkage>();
+    if (packet?.links) {
+      for (const l of packet.links) m.set(l.localId, l);
     }
-  }
-  if (depth !== 0) return undefined;
-  const slice = text.slice(start, i);
-  return stripTrailingCommas(scrubJsonLike(slice));
-}
-function normalizeToItems(payload: any): QuizItem[] | undefined {
-  if (!payload) return;
-  if (Array.isArray(payload.items) && payload.items.length) return payload.items;
-  if (Array.isArray(payload.questions)) return payload.questions;
-  if (payload.raw && typeof payload.raw === "object" && Array.isArray(payload.raw.questions)) {
-    return payload.raw.questions;
-  }
-  if (typeof payload.raw === "string") {
-    const full = payload.raw;
-    const fenced = extractByFence(full);
-    if (fenced) {
-      const parsed = tryParseJson(fenced);
-      if (parsed?.questions && Array.isArray(parsed.questions)) return parsed.questions;
-    }
-    const pure = tryParseJson(scrubJsonLike(full.trim()));
-    if (pure?.questions && Array.isArray(pure.questions)) return pure.questions;
-    const matched = extractByBracketMatch(full);
-    if (matched) {
-      const parsed = tryParseJson(matched);
-      if (parsed?.questions && Array.isArray(parsed.questions)) return parsed.questions;
-    }
-  }
-  const textified = coerceString(payload);
-  const pure = tryParseJson(scrubJsonLike(textified.trim()));
-  if (pure?.questions && Array.isArray(pure.questions)) return pure.questions;
-  return undefined;
-}
+    return m;
+  }, [packet]);
 
-// ---------- Main Prompt Box ----------
-const SUGGESTIONS = [
-  "VCE Methods — differentiation (chain rule) practice",
-  "Year 10 algebra — factorising quadratics",
-  "Intro probability — Bayes theorem word problems",
-  "VCE Specialist — complex numbers (Argand) mixed set",
-];
+  useEffect(() => {
+    const onNew = (e: Event) => {
+      const detail = (e as CustomEvent).detail as QuizPacket;
+      if (!detail?.items?.length) return;
+      setPacket(detail);
+      setIndex(0);
+      setChosen(null);
+      setRevealed(false);
+    };
+    window.addEventListener("quiz:new", onNew as EventListener);
+    return () => window.removeEventListener("quiz:new", onNew as EventListener);
+  }, []);
 
-export function PromptBox() {
-  const [loading, setLoading] = useState(false);
-  const [quizItems, setQuizItems] = useState<QuizItem[] | undefined>(undefined);
-  const [raw, setRaw] = useState<string>("");
-  const [showForm, setShowForm] = useState(true); // <-- controls hiding the form
+  const q = useMemo(() => (packet ? packet.items[index] : null), [packet, index]);
+  const total = packet?.items?.length ?? 0;
 
-  const form = useForm<FormValues>({
-    resolver: zodResolver(formSchema),
-    defaultValues: { prompt: "", count: 5 },
-    mode: "onChange",
-  });
+  const select = (k: "A" | "B" | "C" | "D") => {
+    if (revealed) return;
+    setChosen(k);
+  };
+  const reveal = async () => {
+    if (!q || revealed) return;
+    setRevealed(true);
 
-  async function onSubmit(values: FormValues) {
-    try {
-      setLoading(true);
-      setQuizItems(undefined);
-      setRaw("");
-
-      const res = await fetch("/api/generate-math", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
-      });
-
-      if (!res.ok) throw new Error(await res.text());
-      const data: ApiResponse = await res.json();
-
-      const items = normalizeToItems(data);
-      if (items && items.length) {
-        setQuizItems(items);
-        setShowForm(false); // <-- hide the form after questions arrive
-      } else {
-        const text = coerceString((data as any)?.raw ?? data ?? "");
-        setRaw(text || "No content returned.");
-        // keep the form visible if we didn't get items
-      }
-    } catch (err: any) {
-      setRaw(`Error: ${err?.message ?? "Something went wrong."}`);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const count = form.watch("count");
+    // If you later add submission to DB, you'll have the attemptId here:
+    // const link = linkageMap.get(q.id);
+    // if (link) {
+    //   await fetch("/api/submit-answer", {
+    //     method: "POST",
+    //     headers: { "Content-Type": "application/json" },
+    //     body: JSON.stringify({
+    //       attemptId: link.attemptId,
+    //       chosen,
+    //       correct: chosen === q.answer,
+    //       timeTakenMs: /* track a per-question timer and send it here */,
+    //     }),
+    //   });
+    // }
+  };
+  const next = () => {
+    if (!packet) return;
+    if (index >= packet.items.length - 1) return;
+    setIndex(index + 1);
+    setChosen(null);
+    setRevealed(false);
+  };
+  const prev = () => {
+    if (!packet) return;
+    if (index <= 0) return;
+    setIndex(index - 1);
+    setChosen(null);
+    setRevealed(false);
+  };
 
   return (
-    <Form {...form}>
-      {/* ===== Generator form (hidden once items are ready) ===== */}
-      {showForm && (
-        <form onSubmit={form.handleSubmit(onSubmit)}>
-          <Card className="w-full max-w-2xl p-4 shadow-md bg-white rounded-lg border border-gray-200">
-            <CardHeader>
-              <CardTitle>Generate Math Questions</CardTitle>
-              <CardDescription>
-                Describe the type of questions (topic, level, style). We’ll generate multiple-choice (A–D) with answers.
-              </CardDescription>
-            </CardHeader>
+    <div className="w-full max-w-[720px] rounded-2xl border bg-white p-5">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Interactive Quiz</h2>
+        {total > 0 && (
+          <div className="text-sm text-gray-600">
+            Q{index + 1} / {total}
+          </div>
+        )}
+      </div>
 
-            <div className="px-4 space-y-4">
-              <FormField
-                control={form.control}
-                name="prompt"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Prompt</FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="e.g., Year 12 calculus — related rates word problems"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              {/* Quick suggestions */}
-              <div className="flex flex-wrap gap-2">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => form.setValue("prompt", s, { shouldValidate: true })}
-                    className="text-sm px-2 py-1 rounded-full border hover:bg-gray-50"
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-
-              {/* Count slider */}
-              <FormField
-                control={form.control}
-                name="count"
-                render={() => (
-                  <FormItem>
-                    <FormLabel className="flex items-center justify-between">
-                      Number of questions
-                      <span className="text-sm font-medium tabular-nums">{count}</span>
-                    </FormLabel>
-                    <FormControl>
-                      <Slider
-                        min={1}
-                        max={10}
-                        step={1}
-                        value={[count]}
-                        onValueChange={(v) => form.setValue("count", v[0], { shouldValidate: true })}
-                        aria-label="Number of questions (1 to 10)"
-                        className="w-full"
-                      />
-                    </FormControl>
-                    <p className="text-xs text-muted-foreground">1–10</p>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <Button type="submit" className="mt-2" disabled={loading || !form.formState.isValid}>
-                {loading ? "Generating…" : "Submit"}
-              </Button>
-            </div>
-          </Card>
-        </form>
-      )}
-
-      {/* ===== Quiz (and a "New prompt" action) ===== */}
-      {quizItems && !showForm ? (
+      {!q ? (
         <div className="mt-4">
-          <InteractiveQuiz
-            items={quizItems}
-            onNewPrompt={() => {
-              setQuizItems(undefined);
-              setRaw("");
-              setShowForm(true);
-              form.reset({ prompt: "", count: form.getValues("count") });
-            }}
-          />
+          <EmptyState />
         </div>
-      ) : !showForm && !quizItems ? (
-        // This should be rare—only shown if items failed after we hid form (we don't hide form in that case).
-        <div className="mt-4 rounded-md border p-4 overflow-x-auto">
-          <MarkdownMath content={raw} />
-        </div>
-      ) : raw && showForm ? (
-        // If parsing failed, keep form visible so user can adjust their prompt.
-        <div className="mt-4 rounded-md border p-4 overflow-x-auto">
-          <MarkdownMath content={raw} />
-        </div>
-      ) : null}
-    </Form>
+      ) : (
+        <>
+          {/* Breadcrumb from classification */}
+          <div className="mt-2 text-xs text-gray-500">
+            {q.area} ▸ {q.subject} ▸ {q.topic}
+            {typeof q.difficulty === "number" && (
+              <span className="ml-2 rounded-full border px-2 py-0.5 text-[10px]">Difficulty {q.difficulty}</span>
+            )}
+          </div>
+
+          {/* Stem */}
+          <div className="mt-4 rounded-xl border bg-gray-50 p-4">
+            <div className="prose max-w-none">
+              <div className="min-h-24">
+                <Markdown>{q.stem_md}</Markdown>
+              </div>
+            </div>
+
+            {/* Graph rendering */}
+            {q.graph?.kind === "points" && <PointsPlot g={q.graph as GraphPoints} />}
+            {q.graph?.kind === "function" && <FunctionPlot g={q.graph as GraphFn} />}
+          </div>
+
+          {/* Options */}
+          <div className="mt-4 grid grid-cols-1 gap-3">
+            {(Object.keys(q.options) as Array<"A" | "B" | "C" | "D">).map((k) => {
+              const opt = q.options[k];
+              const isCorrect = revealed && k === q.answer;
+              const isWrong = revealed && chosen === k && k !== q.answer;
+              return (
+                <button
+                  key={k}
+                  onClick={() => select(k)}
+                  className={optionClass(isCorrect, isWrong, chosen === k, revealed)}
+                >
+                  <span className="mr-3 font-semibold">{k}.</span>
+                  <span className="flex-1 text-left line-clamp-3">
+                    <Markdown>{opt}</Markdown>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Controls */}
+          <div className="mt-5 flex items-center gap-2">
+            <button
+              onClick={prev}
+              disabled={index === 0}
+              className="rounded-lg border px-3 py-1 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Prev
+            </button>
+
+            {!revealed ? (
+              <button
+                onClick={reveal}
+                disabled={chosen == null}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Check Answer
+              </button>
+            ) : (
+              <button
+                onClick={next}
+                disabled={index >= (packet?.items.length ?? 1) - 1}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+            )}
+
+            <div className="ml-auto text-sm text-gray-600">
+              {revealed ? (
+                <>Correct answer: <span className="font-semibold">{q.answer}</span></>
+              ) : chosen ? (
+                <>Selected: <span className="font-semibold">{chosen}</span></>
+              ) : (
+                <>Select an option</>
+              )}
+            </div>
+          </div>
+
+          {/* Explanation */}
+          {revealed && (
+            <div className="mt-4 rounded-xl border bg-emerald-50 p-4">
+              <div className="mb-2 text-xs uppercase tracking-wide text-emerald-700">Explanation</div>
+              <div className="prose max-w-none">
+                <Markdown>{q.explanation_md}</Markdown>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
+}
+
+function optionClass(
+  isCorrect: boolean,
+  isWrong: boolean,
+  isChosen: boolean,
+  revealed: boolean
+) {
+  const base = "flex items-start gap-2 rounded-xl border p-3 text-left transition min-h-16";
+  if (revealed) {
+    if (isCorrect) return base + " border-emerald-500 bg-emerald-50";
+    if (isWrong) return base + " border-red-400 bg-red-50";
+    return base + " border-gray-200 bg-white";
+  }
+  return base + (isChosen ? " border-emerald-400 bg-emerald-50" : " border-gray-200 hover:bg-gray-50");
 }

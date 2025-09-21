@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { z } from "zod";
 import { useForm } from "react-hook-form";
@@ -20,11 +20,11 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
-// Plotly (client only)
-const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 import { compile } from "mathjs";
+import { supabase } from "@/lib/supabaseClient";
 
 /* ============================== Types & Schema ============================== */
+
 const formSchema = z.object({
   prompt: z.string().min(5).max(300),
   count: z.coerce.number().int().min(1).max(10),
@@ -60,11 +60,14 @@ type QuizItem = {
 };
 
 type ApiResponse =
-  | { items?: undefined; raw?: unknown; error?: string }
-  | { items: QuizItem[]; raw?: unknown }
+  | { items?: undefined; links?: any; raw?: unknown; error?: string }
+  | { items: QuizItem[]; links?: any; raw?: unknown }
   | any;
 
+type LinkMap = { localId: number; questionId: string; attemptId: string; answer: "A" | "B" | "C" | "D" };
+
 /* ============================== STEM Detection ============================== */
+
 const STEM_HELP =
   "This tool only supports academic STEM prompts (maths, physics, chemistry, biology, earth/space, computer science, engineering, statistics). Please rephrase your prompt to a STEM topic.";
 
@@ -85,6 +88,7 @@ function isLikelySTEM(s: string): boolean {
 }
 
 /* ============================ Markdown + KaTeX ============================= */
+
 function MarkdownMath({ content }: { content: string }) {
   return (
     <div className="space-y-2 leading-relaxed">
@@ -96,8 +100,10 @@ function MarkdownMath({ content }: { content: string }) {
 }
 
 /* =============================== Graph Renderer ============================ */
+
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
+
 function GraphRenderer({ graph }: { graph: GraphSpec }) {
-  // Build x/y
   const data = useMemo(() => {
     try {
       if (graph.kind === "function") {
@@ -134,7 +140,7 @@ function GraphRenderer({ graph }: { graph: GraphSpec }) {
           title: graph.title ?? "",
           xaxis: { title: graph.xLabel ?? "x" },
           yaxis: { title: graph.yLabel ?? "y" },
-          margin: { l: 40, r: 20, t: (graph.title ? 40 : 10), b: 40 },
+          margin: { l: 40, r: 20, t: graph.title ? 40 : 10, b: 40 },
           autosize: true,
         }}
         useResizeHandler
@@ -146,16 +152,23 @@ function GraphRenderer({ graph }: { graph: GraphSpec }) {
 }
 
 /* ============================ Interactive Quiz ============================= */
+
 function InteractiveQuiz({
   items,
+  links,
+  authUserId,
   onNewPrompt,
 }: {
   items: QuizItem[];
+  links: LinkMap[];         // required array (never undefined)
+  authUserId: string;
   onNewPrompt: () => void;
 }) {
   const [responses, setResponses] = useState<Record<number, "A" | "B" | "C" | "D" | undefined>>({});
   const [submitted, setSubmitted] = useState(false);
   const [idx, setIdx] = useState(0);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitOk, setSubmitOk] = useState(false);
 
   const q = items[idx];
   const isFirst = idx === 0;
@@ -168,13 +181,68 @@ function InteractiveQuiz({
     return { correct, total: items.length };
   }, [submitted, responses, items]);
 
+  const linkByLocalId = useMemo(() => {
+    const m = new Map<number, LinkMap>();
+    for (const l of links || []) m.set(l.localId, l);
+    return m;
+  }, [links]);
+
   function setAnswer(value: "A" | "B" | "C" | "D") {
     setResponses((prev) => ({ ...prev, [q.id]: value }));
   }
   const goNext = () => { if (!isLast) setIdx((i) => i + 1); };
   const goBack = () => { if (!isFirst) setIdx((i) => i - 1); };
 
-  // Fixed desktop width; card height is dynamic now
+  const handleSubmitAll = async () => {
+    setSubmitted(true);
+    setSubmitError(null);
+    setSubmitOk(false);
+
+    // Build submissions safely
+    const submissions = items
+      .map((it) => {
+        const link = linkByLocalId.get(it.id);
+        const chosen = responses[it.id];
+        if (!link || !chosen) return null;
+        return {
+          attemptId: link.attemptId,
+          questionId: link.questionId,
+          chosen: String(chosen).trim().toUpperCase(),
+          expected: String(link.answer).trim().toUpperCase(),
+        };
+      })
+      .filter(Boolean) as Array<{
+        attemptId: string;
+        questionId: string;
+        chosen: "A" | "B" | "C" | "D";
+        expected: "A" | "B" | "C" | "D";
+      }>;
+
+    if (submissions.length === 0) {
+      setSubmitError("Nothing to submit. Please answer at least one question.");
+      return;
+    }
+
+    try {
+      // Optional debug
+      // console.log("submit payload", { authUserId, submissions });
+
+      const res = await fetch("/api/submit-attempt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authUserId, submissions }),
+      });
+      const json = await res.json();
+
+      // console.log("submit response", json);
+
+      if (!res.ok) throw new Error(json?.error || "Failed to submit attempts");
+      setSubmitOk(true);
+    } catch (e: any) {
+      setSubmitError(e?.message ?? "Unexpected error while submitting attempts.");
+    }
+  };
+
   const WRAP_WIDTH = "w-full sm:w-[760px]";
 
   return (
@@ -197,9 +265,11 @@ function InteractiveQuiz({
           Score: {score.correct}/{score.total}
         </div>
       )}
+      {submitOk && <div className="rounded-md border p-3 text-green-700">Saved! Your answers have been recorded.</div>}
+      {submitError && <div className="rounded-md border p-3 text-red-700">{submitError}</div>}
 
-      {/* Dynamic-height card */}
-      <Card className="w-full p-4 border flex flex-col">
+      {/* Question Card */}
+      <Card className="w-full p-4 border bg-white flex flex-col">
         <div className="mb-2 font-semibold">Question {idx + 1}</div>
 
         {/* Stem */}
@@ -213,16 +283,17 @@ function InteractiveQuiz({
         {/* Options */}
         <div className="mt-2 space-y-2">
           <RadioGroup
-            value={responses[q.id] ?? undefined}
-            onValueChange={(v: any) => setAnswer(v)}
+            key={q.id} // ✅ remount when question changes
+            value={responses[q.id] ?? ""} // ✅ always controlled (string)
+            onValueChange={(v: "A" | "B" | "C" | "D") => setAnswer(v)}
             className="space-y-2"
             disabled={submitted}
           >
             {(["A", "B", "C", "D"] as const).map((opt) => {
               const optId = `q${q.id}-${opt}`;
               const content = q.options[opt];
-              const chosen = responses[q.id];
 
+              const chosen = responses[q.id];
               const isSelected = chosen === opt;
               const isCorrect  = submitted && q.answer === opt;
               const isWrong    = submitted && chosen === opt && chosen !== q.answer;
@@ -249,6 +320,7 @@ function InteractiveQuiz({
               );
             })}
           </RadioGroup>
+
         </div>
 
         {/* Explanation after submit */}
@@ -266,7 +338,7 @@ function InteractiveQuiz({
       {!submitted ? (
         isLast ? (
           <div className="flex justify-end">
-            <Button type="button" onClick={() => setSubmitted(true)}>
+            <Button type="button" onClick={handleSubmitAll}>
               Submit
             </Button>
           </div>
@@ -284,6 +356,8 @@ function InteractiveQuiz({
                 setSubmitted(false);
                 setResponses({});
                 setIdx(0);
+                setSubmitOk(false);
+                setSubmitError(null);
               }}
             >
               Reset answers
@@ -298,7 +372,8 @@ function InteractiveQuiz({
   );
 }
 
-/* ======================= Robust payload → items (unchanged) ====================== */
+/* ======================= Robust payload → items ====================== */
+
 function coerceString(v: unknown) {
   if (typeof v === "string") return v;
   try { return JSON.stringify(v ?? ""); } catch { return String(v ?? ""); }
@@ -352,6 +427,7 @@ function extractItemsFromPayload(payload: any): QuizItem[] | undefined {
 }
 
 /* ================================ Main UI ================================= */
+
 const SUGGESTIONS = [
   "VCE Methods — differentiation (chain rule) practice",
   "Year 10 algebra — factorising quadratics",
@@ -362,14 +438,33 @@ const SUGGESTIONS = [
 export function PromptBox() {
   const [loading, setLoading] = useState(false);
   const [quizItems, setQuizItems] = useState<QuizItem[] | undefined>(undefined);
+  const [links, setLinks] = useState<LinkMap[]>([]); // ✅ always an array
   const [raw, setRaw] = useState<string>("");
   const [showForm, setShowForm] = useState(true);
+  const [authUserId, setAuthUserId] = useState<string | null>(null);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: { prompt: "", count: 5 },
     mode: "onChange",
   });
+
+  // Load Supabase user id once
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      if (!alive) return;
+      setAuthUserId(data.user?.id ?? null);
+    })();
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) => {
+      setAuthUserId(session?.user?.id ?? null);
+    });
+    return () => {
+      sub.subscription.unsubscribe();
+      alive = false;
+    };
+  }, []);
 
   const count = form.watch("count");
   const promptValue = form.watch("prompt");
@@ -379,22 +474,34 @@ export function PromptBox() {
     if (isLikelySTEM(promptValue) && form.formState.errors.prompt?.message === STEM_HELP) {
       form.clearErrors("prompt");
     }
-  }, [promptValue]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [promptValue]);
 
   async function onSubmit(values: FormValues) {
     if (!isLikelySTEM(values.prompt)) {
       form.setError("prompt", { type: "manual", message: STEM_HELP });
       return;
     }
+    if (!authUserId) {
+      form.setError("prompt", { type: "manual", message: "Please sign in to generate and record your questions." });
+      return;
+    }
+
+    // Optional taxonomy (adjust as needed)
+    const area = "Mathematics";
+    const subject = "General";
+    const topic = "Mixed";
+
     try {
       setLoading(true);
       setQuizItems(undefined);
+      setLinks([]);
       setRaw("");
 
       const res = await fetch("/api/generate-math", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
+        body: JSON.stringify({ ...values, authUserId, area, subject, topic }),
       });
 
       if (res.status === 422) {
@@ -405,6 +512,11 @@ export function PromptBox() {
       if (!res.ok) throw new Error(await res.text());
 
       const data: ApiResponse = await res.json();
+
+      // ✅ capture links; fall back to []
+      const gotLinks = Array.isArray((data as any).links) ? ((data as any).links as LinkMap[]) : [];
+      setLinks(gotLinks);
+
       const items = extractItemsFromPayload(data);
       if (items && items.length) {
         setQuizItems(items);
@@ -423,7 +535,7 @@ export function PromptBox() {
     <Form {...form}>
       {showForm && (
         <form onSubmit={form.handleSubmit(onSubmit)}>
-          <Card className="w-full max-w-2xl p-4 shadow-md bg-white rounded-lg border border-gray-200">
+          <Card className="w-full max-w-2xl p-4 bg-white rounded-lg border border-gray-200">
             <CardHeader>
               <CardTitle>Generate STEM Multiple-Choice Questions</CardTitle>
               <CardDescription>
@@ -521,8 +633,11 @@ export function PromptBox() {
         <div className="mt-4">
           <InteractiveQuiz
             items={quizItems}
+            links={links}                    // ✅ always an array
+            authUserId={authUserId!}
             onNewPrompt={() => {
               setQuizItems(undefined);
+              setLinks([]);
               setRaw("");
               setShowForm(true);
               form.reset({ prompt: "", count: form.getValues("count") });
