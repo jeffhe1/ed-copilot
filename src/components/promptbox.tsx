@@ -89,11 +89,89 @@ function isLikelySTEM(s: string): boolean {
 
 /* ============================ Markdown + KaTeX ============================= */
 
-function MarkdownMath({ content }: { content: string }) {
+function maskSegments(s: string) {
+  type Seg = { ph: string; content: string };
+  const segs: Seg[] = [];
+  let text = s;
+  let i = 0;
+
+  const add = (re: RegExp) => {
+    text = text.replace(re, (m) => {
+      const ph = `\uE000PH${i++}\uE001`;
+      segs.push({ ph, content: m });
+      return ph;
+    });
+  };
+
+  // Mask fences, inline code, links, images, HTML, then math
+  add(/```[\s\S]*?```/g);                 // fenced code
+  add(/`[^`]*`/g);                        // inline code
+  add(/!\[[^\]]*\]\([^)]+\)/g);           // images
+  add(/\[[^\]]*\]\([^)]+\)/g);            // links
+  add(/<[^>]+>/g);                        // simple HTML tags
+  add(/\$\$[\s\S]*?\$\$/g);               // block math
+  add(/(?<!\$)\$[^$]*\$(?!\$)/g);         // inline math
+
+  return {
+    text,
+    restore: (t: string) => segs.reduce((acc, { ph, content }) => acc.replace(ph, content), t),
+  };
+}
+
+// A conservative whitelist of TeX commands to auto-wrap.
+// Add more if your generator uses them.
+const TEX_WHITELIST = new Set([
+  // functions/symbols
+  "alpha","beta","gamma","delta","epsilon","varepsilon","zeta","eta","theta","vartheta","iota","kappa","lambda","mu","nu","xi",
+  "pi","varpi","rho","varrho","sigma","varsigma","tau","upsilon","phi","varphi","chi","psi","omega",
+  "sin","cos","tan","csc","sec","cot","arcsin","arccos","arctan","sinh","cosh","tanh","ln","log","exp","sqrt",
+  "frac","binom","cdot","times","pm","mp","le","ge","neq","infty","sum","prod","int","lim","deg",
+  "overline","underline","vec","overrightarrow","to","rightarrow","left","Rightarrow","Rightarrow","dots","ldots","cdots","text",
+]);
+
+/**
+ * Auto-wrap common LaTeX outside code/math:
+ *  - \alpha, \frac{...}{...}, \sqrt(...), \text{...}
+ *  - simple x^2, x_1 forms
+ * Skips \\escaped, \* markdown escapes, and unknown \words.
+ */
+function autoWrapConservative(src: string): string {
+  if (!src) return src;
+  const mask = maskSegments(src);
+  let s = mask.text;
+
+  // Wrap whitelisted TeX commands with optional ^.../_... and ()/{...} groups.
+  // This handles cases like:
+  //   \sin^5(4x^2)      → $...$
+  //   \sum_{i=1}^n      → $...$
+  //   \frac{a}{b}       → $...$
+  //   \sqrt{x+1}        → $...$
+  // The big tail allows repeats of ^.../_... and ()/{...} in any order.
+  s = s.replace(
+    /(?<![\$\\])\\([A-Za-z]+)((?:\s*(?:\{[^{}]*\}|\([^()]*\)|\^(?:\{[^{}]*\}|\w+)|_(?:\{[^{}]*\}|\w+))*))/g,
+    (_m, name: string, tail: string) => {
+      if (!TEX_WHITELIST.has(name)) return `\\${name}${tail}`;
+      return `$\\${name}${tail}$`;
+    }
+  );
+
+  // Simple powers/subscripts outside math/code (kept for bare x^2, x_1 cases)
+  s = s.replace(/(?<![\w$])([A-Za-z0-9])\^(\d+)(?![\w$])/g, (_m, b: string, e: string) => `$${b}^{${e}}$`);
+  s = s.replace(/(?<![\w$])([A-Za-z])_(\d+)(?![\w$])/g, (_m, b: string, sub: string) => `$${b}_{${sub}}$`);
+
+  return mask.restore(s);
+}
+
+
+export function MarkdownMath({ content }: { content: string }) {
+  const safe = autoWrapConservative(content);
   return (
     <div className="space-y-2 leading-relaxed">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-        {content}
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]} // fail-soft
+      >
+        {safe}
       </ReactMarkdown>
     </div>
   );
