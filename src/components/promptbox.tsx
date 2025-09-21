@@ -160,7 +160,7 @@ function InteractiveQuiz({
   onNewPrompt,
 }: {
   items: QuizItem[];
-  links: LinkMap[];         // required array (never undefined)
+  links: LinkMap[];
   authUserId: string;
   onNewPrompt: () => void;
 }) {
@@ -193,22 +193,55 @@ function InteractiveQuiz({
   const goNext = () => { if (!isLast) setIdx((i) => i + 1); };
   const goBack = () => { if (!isFirst) setIdx((i) => i - 1); };
 
+  /* ---------- NEW: per-question shuffled options ---------- */
+
+  type ShuffledEntry = {
+    originalKey: "A" | "B" | "C" | "D";   // original answer letter from payload
+    displayKey: "A" | "B" | "C" | "D";    // letter shown after shuffle
+    content: string;
+  };
+
+  function shuffleInPlace<T>(arr: T[]) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  // Build once per items load (stable across navigation)
+  const shuffledById = useMemo(() => {
+    const map = new Map<number, ShuffledEntry[]>();
+    for (const it of items) {
+      const entries = (["A", "B", "C", "D"] as const).map((k) => ({
+        originalKey: k,
+        content: it.options[k],
+      }));
+      const shuffled = shuffleInPlace(entries.slice());
+      const labeled = shuffled.map((e, i) => ({
+        ...e,
+        displayKey: (["A", "B", "C", "D"][i] as "A" | "B" | "C" | "D"),
+      }));
+      map.set(it.id, labeled);
+    }
+    return map;
+  }, [items]);
+
   const handleSubmitAll = async () => {
     setSubmitted(true);
     setSubmitError(null);
     setSubmitOk(false);
 
-    // Build submissions safely
     const submissions = items
       .map((it) => {
         const link = linkByLocalId.get(it.id);
-        const chosen = responses[it.id];
-        if (!link || !chosen) return null;
+        const chosenOriginalKey = responses[it.id]; // <-- we stored ORIGINAL key
+        if (!link || !chosenOriginalKey) return null;
         return {
           attemptId: link.attemptId,
           questionId: link.questionId,
-          chosen: String(chosen).trim().toUpperCase(),
-          expected: String(link.answer).trim().toUpperCase(),
+          chosen: String(chosenOriginalKey).trim().toUpperCase() as "A" | "B" | "C" | "D",
+          expected: String(link.answer).trim().toUpperCase() as "A" | "B" | "C" | "D",
         };
       })
       .filter(Boolean) as Array<{
@@ -224,23 +257,22 @@ function InteractiveQuiz({
     }
 
     try {
-      // Optional debug
-      // console.log("submit payload", { authUserId, submissions });
-
       const res = await fetch("/api/submit-attempt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ authUserId, submissions }),
       });
       const json = await res.json();
-
-      // console.log("submit response", json);
-
       if (!res.ok) throw new Error(json?.error || "Failed to submit attempts");
       setSubmitOk(true);
     } catch (e: any) {
       setSubmitError(e?.message ?? "Unexpected error while submitting attempts.");
     }
+  };
+
+  const displayKeyFor = (qid: number, original: "A" | "B" | "C" | "D") => {
+    const list = shuffledById.get(qid);
+      return list?.find((e) => e.originalKey === original)?.displayKey ?? original;
   };
 
   const WRAP_WIDTH = "w-full sm:w-[760px]";
@@ -280,27 +312,25 @@ function InteractiveQuiz({
         {/* Optional graph */}
         {q.graph ? <GraphRenderer graph={q.graph} /> : null}
 
-        {/* Options */}
+        {/* Options (SHUFFLED) */}
         <div className="mt-2 space-y-2">
           <RadioGroup
-            key={q.id} // ✅ remount when question changes
-            value={responses[q.id] ?? ""} // ✅ always controlled (string)
+            key={q.id} // remount when question changes
+            value={responses[q.id] ?? ""}  // value = ORIGINAL KEY we store
             onValueChange={(v: "A" | "B" | "C" | "D") => setAnswer(v)}
             className="space-y-2"
             disabled={submitted}
           >
-            {(["A", "B", "C", "D"] as const).map((opt) => {
-              const optId = `q${q.id}-${opt}`;
-              const content = q.options[opt];
-
+            {(shuffledById.get(q.id) ?? []).map(({ originalKey, displayKey, content }) => {
+              const optId = `q${q.id}-${displayKey}`;
               const chosen = responses[q.id];
-              const isSelected = chosen === opt;
-              const isCorrect  = submitted && q.answer === opt;
-              const isWrong    = submitted && chosen === opt && chosen !== q.answer;
+              const isSelected = chosen === originalKey;           // compare to original key
+              const isCorrect  = submitted && q.answer === originalKey;
+              const isWrong    = submitted && chosen === originalKey && chosen !== q.answer;
 
               return (
                 <div
-                  key={opt}
+                  key={displayKey}
                   className={[
                     "flex items-center gap-3 rounded-lg border-2 px-3 py-3 transition w-full",
                     !submitted ? "hover:border-primary/50" : "",
@@ -309,9 +339,10 @@ function InteractiveQuiz({
                     isWrong   ? "border-red-600 ring-2 ring-red-300" : "",
                   ].join(" ")}
                 >
-                  <RadioGroupItem id={optId} value={opt} className="sr-only" />
+                  {/* IMPORTANT: Radio value is ORIGINAL KEY */}
+                  <RadioGroupItem id={optId} value={originalKey} className="sr-only" />
                   <Label htmlFor={optId} className="cursor-pointer w-full flex items-center gap-2">
-                    <span className="w-6 text-right font-medium">{opt}.</span>
+                    <span className="w-6 text-right font-medium">{displayKey}.</span>
                     <span className="inline-block align-middle leading-relaxed w-full break-words [word-break:break-word]">
                       <MarkdownMath content={content} />
                     </span>
@@ -320,13 +351,14 @@ function InteractiveQuiz({
               );
             })}
           </RadioGroup>
-
         </div>
 
         {/* Explanation after submit */}
         {submitted && (
           <div className="mt-4 border-t pt-3">
-            <div className="text-sm font-semibold">Correct answer: {q.answer}</div>
+            <div className="text-sm font-semibold">
+              Correct answer: {displayKeyFor(q.id, q.answer)}
+            </div>
             <div className="mt-1 text-sm break-words [word-break:break-word]">
               <MarkdownMath content={q.explanation_md} />
             </div>
@@ -371,6 +403,7 @@ function InteractiveQuiz({
     </div>
   );
 }
+
 
 /* ======================= Robust payload → items ====================== */
 
@@ -438,7 +471,7 @@ const SUGGESTIONS = [
 export function PromptBox() {
   const [loading, setLoading] = useState(false);
   const [quizItems, setQuizItems] = useState<QuizItem[] | undefined>(undefined);
-  const [links, setLinks] = useState<LinkMap[]>([]); // ✅ always an array
+  const [links, setLinks] = useState<LinkMap[]>([]);
   const [raw, setRaw] = useState<string>("");
   const [showForm, setShowForm] = useState(true);
   const [authUserId, setAuthUserId] = useState<string | null>(null);
@@ -633,7 +666,7 @@ export function PromptBox() {
         <div className="mt-4">
           <InteractiveQuiz
             items={quizItems}
-            links={links}                    // ✅ always an array
+            links={links}
             authUserId={authUserId!}
             onNewPrompt={() => {
               setQuizItems(undefined);
