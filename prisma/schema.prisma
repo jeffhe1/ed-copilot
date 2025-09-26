@@ -116,3 +116,28 @@ model SkillMastery {
   @@unique([studentId, skillId])
   @@index([skillId])
 }
+
+enum Area {
+  Mathematical_Methods
+  Specialist_Mathematics
+  General_Mathematics
+  Foundation_Mathematics
+}
+
+model Mcq {
+  id             String   @id @default(cuid())
+  area           Area
+  subject        String
+  topic          String
+  stem_md        String   @db.Text
+  options_json   Json
+  answer         String   @db.VarChar(1)
+  explanation_md String   @db.Text
+  graph_json     Json?
+  skill_ids      String[] @db.Text
+  difficulty     Int?
+  source         String?  // e.g. "generated:o4-mini"
+  createdAt      DateTime @default(now())
+
+  @@index([area, subject, topic, createdAt])
+}

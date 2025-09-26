@@ -540,10 +540,17 @@ function extractItemsFromPayload(payload: any): QuizItem[] | undefined {
 /* ================================ Main UI ================================= */
 
 const SUGGESTIONS = [
-  "VCE Methods — differentiation (chain rule) practice",
-  "Year 10 algebra — factorising quadratics",
-  "Intro probability — Bayes theorem word problems",
-  "VCE Specialist — complex numbers (Argand) mixed set",
+  // Mathematical Methods
+  "VCE Methods — sketching transformations of logarithmic functions",
+
+  // Specialist Mathematics
+  "VCE Specialist — complex numbers in polar form (cis notation)",
+
+  // General Mathematics
+  "VCE General — time series analysis (trend + seasonality)",
+
+  // Foundation Mathematics
+  "VCE Foundation — linear relations in real-world contexts",
 ];
 
 export function PromptBox() {

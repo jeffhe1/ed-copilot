@@ -6,34 +6,136 @@ import type { Prisma } from "@prisma/client";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* =============================== TAXONOMY =============================== */
-// Keep this small and authoritative. You can move it to lib/taxonomy later.
+/* =============================== TAXONOMY (VCE-aligned) =============================== */
+// Top-level "areas" are the four VCE Mathematics studies
 const AREAS = [
-  "Mathematics","Physics","Chemistry","Biology","English","Languages","Computer Science"
+  "Mathematical Methods",
+  "Specialist Mathematics",
+  "General Mathematics",
+  "Foundation Mathematics",
 ] as const;
 type Area = typeof AREAS[number];
 
 const SUBJECTS: Record<Area, string[]> = {
-  Mathematics: ["Algebra","Functions","Calculus","Probability","Statistics","Geometry","Trigonometry"],
-  Physics: ["Mechanics","Waves","Electricity","Modern Physics","Thermodynamics"],
-  Chemistry: ["Stoichiometry","Atomic Structure","Bonding","Thermochemistry","Equilibrium","Acids & Bases","Redox"],
-  Biology: ["Cell Biology","Genetics","Evolution","Human Physiology","Ecology"],
-  English: ["Reading","Writing","Language Analysis","Argument"],
-  Languages: ["Vocabulary","Grammar","Listening","Reading","Writing","Speaking"],
-  "Computer Science": ["Algorithms","Data Structures","Complexity","Programming"],
+  "Mathematical Methods": [
+    "Functions and Graphs",
+    "Algebra",
+    "Calculus",
+    "Probability and Statistics",
+  ],
+  "Specialist Mathematics": [
+    "Algebra, Number and Structure",
+    "Functions, Relations and Graphs",
+    "Calculus",
+    "Discrete Mathematics",
+    "Space and Measurement",
+    "Data Analysis, Probability and Statistics",
+  ],
+  "General Mathematics": [
+    "Data Analysis",
+    "Recursion and Financial Modelling",
+    "Matrices",
+    "Networks and Decision Mathematics",
+  ],
+  "Foundation Mathematics": [
+    "Algebra, Number and Structure",
+    "Data Analysis, Probability and Statistics",
+    "Discrete Mathematics",
+    "Space and Measurement",
+  ],
 };
 
 const TOPICS: Record<string, string[]> = {
-  Algebra: ["Linear Equations","Quadratics","Inequalities","Exponentials","Logs","Polynomials"],
-  Functions: ["Graphing","Transformations","Inverses","Asymptotes"],
-  Calculus: ["Limits","Derivatives","Applications of Derivatives","Integrals","Series","Differential Equations"],
-  Probability: ["Combinatorics","Discrete RVs","Continuous RVs","Bayes","Markov Chains"],
-  Statistics: ["Descriptive","Inference","Regression","Hypothesis Testing"],
-  Geometry: ["Euclidean","Coordinate","Circles","Similarity","Congruence"],
-  Trigonometry: ["Trig Identities","Radian Measure","Graphs","Equations"],
-  // add more as needed
-};
+  /* ========== Mathematical Methods ========== */
+  "Functions and Graphs": [
+    "Function Concepts and Notation",
+    "Polynomial Functions",
+    "Rational, Power, Exponential, Logarithmic",
+    "Circular Trigonometric Functions",
+    "Transformations and Combinations",
+    "Inverses, Domains and Ranges",
+    "Graph Features and Asymptotes",
+  ],
+  "Algebra": [
+    "Indices and Logarithms",
+    "Factorisation and Partial Fractions (simple)",
+    "Equations and Inequalities",
+    "Trig Identities and Exact Values",
+  ],
+  "Calculus": [
+    "Limits and Continuity",
+    "Differentiation Rules (chain/product/quotient)",
+    "Applications of Differentiation (rates/optima)",
+    "Antiderivatives and Definite Integrals",
+    "Area Under and Between Curves",
+    "Introductory Differential Equations (contexts)",
+  ],
+  "Probability and Statistics": [
+    "Discrete Random Variables (incl. Binomial)",
+    "Continuous Random Variables (Normal)",
+    "Expected Value and Variance",
+    "Conditional Probability and Independence",
+    "Sampling and Simulation Ideas",
+  ],
 
+  /* ========== Specialist Mathematics ========== */
+  "Algebra, Number and Structure": [
+    "Complex Numbers (algebra/geometry)",
+    "Sequences and Series",
+    "Binomial Theorem",
+    "Advanced Recursions and Closed Forms",
+  ],
+  "Functions, Relations and Graphs": [
+    "Parametric and Piecewise Definitions",
+    "Further Trigonometry (inverse trig, identities)",
+    "Alternative Representations (incl. polar where specified)",
+  ],
+  "Discrete Mathematics": [
+    "Statement Logic and Quantifiers",
+    "Proof (direct, contrapositive, contradiction)",
+    "Mathematical Induction",
+  ],
+  "Space and Measurement": [
+    "Vectors in 2D and 3D",
+    "Scalar and Vector Products",
+    "Lines and Planes",
+    "Kinematics with Vectors",
+  ],
+  "Data Analysis, Probability and Statistics": [
+    "Combinatorics and Counting Arguments",
+    "Distributions beyond Methods scope",
+    "Expectation, Variance and Transformations",
+  ],
+
+  /* ========== General Mathematics ========== */
+  "Data Analysis": [
+    "Univariate and Bivariate Summaries",
+    "Correlation and Least Squares Regression",
+    "Residuals and Transformations",
+    "Time Series (smoothing/trend/seasonality/forecasting)",
+  ],
+  "Recursion and Financial Modelling": [
+    "Recurrence Relations (linear/geometric)",
+    "Simple vs Compound Interest",
+    "Annuities and Perpetuities",
+    "Amortisation Schedules and Loans",
+    "Nominal vs Effective Rates; TVM Concepts",
+  ],
+  "Matrices": [
+    "Matrix Arithmetic and Inverses (2×2 where applicable)",
+    "Transition Matrices and Markov Chains",
+    "Steady State and Long-Run Behaviour",
+    "Applications to Population Models",
+  ],
+  "Networks and Decision Mathematics": [
+    "Graphs, Euler and Hamilton Concepts",
+    "Planarity and Trees",
+    "Minimum Spanning Trees (Prim/Kruskal)",
+    "Shortest Path (Dijkstra)",
+    "Max-Flow/Min-Cut",
+    "Scheduling and Critical Path (CPM, crashing basics)",
+  ],
+};
 function isValidPath(area: string, subject: string, topic: string) {
   if (!AREAS.includes(area as Area)) return false;
   const sOK = SUBJECTS[area as Area]?.includes(subject);
