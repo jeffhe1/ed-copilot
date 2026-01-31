@@ -8,11 +8,8 @@ import { Label } from "@/components/ui/label";
 import { Eye, EyeOff } from "lucide-react";
 
 /** Helpers */
-const tenDigit = () =>
-  Math.floor(1000000000 + Math.random() * 9000000000).toString();
-const slugify = (s: string) => s.replace(/[^a-z0-9]/gi, "").toLowerCase();
-const buildUsername = (first: string, last: string) =>
-  `${slugify(first)}${slugify(last)}${tenDigit()}`;
+const buildDisplayName = (first: string, last: string) =>
+  `${first.trim()} ${last.trim()}`.trim();
 
 type Props = {
   /** Called after successful sign up (e.g. toggle back to sign-in UI) */
@@ -50,35 +47,40 @@ export default function SignUpFormShadcn({ onSuccess }: Props) {
 
     setSubmitting(true);
     try {
-      const username = buildUsername(first, last);
+      const displayName = buildDisplayName(first, last);
 
       const { data, error } = await supabase.auth.signUp({
         email,
         password: pw,
         options: {
-          data: { firstName: first.trim(), lastName: last.trim(), username },
+          data: { firstName: first.trim(), lastName: last.trim(), full_name: displayName },
         },
       });
       if (error) throw error;
 
-      // Optional: create/update your Student row here if you want to do it immediately
+      // Ensure student exists in Prisma (server-side)
       if (data.user) {
-        await supabase
-          .from("Student")
-          .upsert(
-            { authUserId: data.user.id, email, name: `${first.trim()} ${last.trim()}` },
-            { onConflict: "authUserId" }
-          );
+        try {
+          await fetch("/api/ensure-student", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              authUserId: data.user.id,
+              email,
+              name: displayName || (email ? email.split("@")[0] : "New Student"),
+            }),
+          });
+        } catch {
+          // Non-blocking; profile will ensure later
+        }
       }
 
-      setMsg("Account created. You can now sign in.");
+      setMsg("A confirmation email has been sent. Please verify your email to continue.");
       setFirst("");
       setLast("");
       setEmail("");
       setPw("");
 
-      // Let parent swap to sign-in
-      onSuccess?.();
     } catch (e: any) {
       setErr(e?.message ?? "Sign-up failed. Please try again.");
     } finally {

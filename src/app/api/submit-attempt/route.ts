@@ -1,5 +1,6 @@
 // app/api/submit-attempt/route.ts
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 type SubmitRow = {
@@ -34,7 +35,7 @@ export async function POST(req: Request) {
 
     const results: Array<{ attemptId: string; correct: boolean; updated: number }> = [];
 
-    await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       for (const row of submissions) {
         const attempt = await tx.attempt.findUnique({
           where: { id: row.attemptId },

@@ -66,27 +66,6 @@ type ApiResponse =
 
 type LinkMap = { localId: number; questionId: string; attemptId: string; answer: "A" | "B" | "C" | "D" };
 
-/* ============================== STEM Detection ============================== */
-
-const STEM_HELP =
-  "This tool only supports academic STEM prompts (maths, physics, chemistry, biology, earth/space, computer science, engineering, statistics). Please rephrase your prompt to a STEM topic.";
-
-function isLikelySTEM(s: string): boolean {
-  const t = s.toLowerCase();
-  const hits = [
-    "math","maths","calculus","algebra","geometry","trigonometry","differentiation","integration","limit","series",
-    "probability","statistics","matrix","vector","complex number",
-    "physics","mechanics","electric","magnet","thermo","optics","quantum","kinematics",
-    "chemistry","stoichiometry","equilibrium","acid","base","redox","organic","bond",
-    "biology","genetics","cell","enzyme","ecology","evolution","physiology",
-    "geology","earth","plate tectonics","seismology","mineral",
-    "astronomy","astrophysics","cosmology","planet","orbit",
-    "computer","algorithm","data structure","complexity","programming","cs",
-    "engineering","circuit","signal","control","materials","mechanical","electrical",
-  ];
-  return hits.some((k) => t.includes(k));
-}
-
 /* ============================ Markdown + KaTeX ============================= */
 
 function maskSegments(s: string) {
@@ -309,6 +288,7 @@ function InteractiveQuiz({
     setSubmitted(true);
     setSubmitError(null);
     setSubmitOk(false);
+    setIdx(0);
 
     const submissions = items
       .map((it) => {
@@ -358,32 +338,40 @@ function InteractiveQuiz({
   return (
     <div className={`${WRAP_WIDTH} mx-auto space-y-6`}>
       {/* Top nav */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-2">
-          <Button type="button" variant="outline" onClick={goBack} disabled={isFirst}>
+          <Button type="button" variant="outline" size="sm" onClick={goBack} disabled={isFirst} className="cursor-pointer">
             Back
           </Button>
-          <Button type="button" variant="outline" onClick={goNext} disabled={isLast}>
+          <Button type="button" variant="outline" size="sm" onClick={goNext} disabled={isLast} className="cursor-pointer">
             Next
           </Button>
         </div>
-        <div className="text-sm font-medium">Q{idx + 1} / {items.length}</div>
+        <div className="text-sm font-medium text-muted-foreground tabular-nums">Q{idx + 1} / {items.length}</div>
       </div>
 
       {submitted && score && (
-        <div className="rounded-md border p-3 font-medium">
-          Score: {score.correct}/{score.total}
+        <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 font-medium">
+          Score: <span className="text-primary">{score.correct}</span> / {score.total}
         </div>
       )}
-      {submitOk && <div className="rounded-md border p-3 text-green-700">Saved! Your answers have been recorded.</div>}
-      {submitError && <div className="rounded-md border p-3 text-red-700">{submitError}</div>}
+      {submitOk && (
+        <div className="rounded-lg border border-[var(--success)]/50 bg-[var(--success)]/10 px-4 py-3 text-sm font-medium text-[var(--success)]">
+          Saved! Your answers have been recorded.
+        </div>
+      )}
+      {submitError && (
+        <div className="rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
+          {submitError}
+        </div>
+      )}
 
       {/* Question Card */}
-      <Card className="w-full p-4 border bg-white flex flex-col">
-        <div className="mb-2 font-semibold">Question {idx + 1}</div>
+      <Card className="w-full p-5 border shadow-sm bg-card flex flex-col gap-4">
+        <div className="text-sm font-medium text-muted-foreground">Question {idx + 1}</div>
 
         {/* Stem */}
-        <div className="mb-3 break-words [word-break:break-word]">
+        <div className="break-words [word-break:break-word] leading-relaxed">
           <MarkdownMath content={q.stem_md} />
         </div>
 
@@ -413,8 +401,8 @@ function InteractiveQuiz({
                     "flex items-center gap-3 rounded-lg border-2 px-3 py-3 transition w-full",
                     !submitted ? "hover:border-primary/50" : "",
                     isSelected && !submitted ? "border-primary ring-2 ring-primary/30" : "",
-                    isCorrect ? "border-green-600 ring-2 ring-green-300" : "",
-                    isWrong   ? "border-red-600 ring-2 ring-red-300" : "",
+                    isCorrect ? "border-[var(--success)] ring-2 ring-[var(--success)]/30" : "",
+                    isWrong   ? "border-destructive ring-2 ring-destructive/30" : "",
                   ].join(" ")}
                 >
                   {/* IMPORTANT: Radio value is ORIGINAL KEY */}
@@ -433,11 +421,11 @@ function InteractiveQuiz({
 
         {/* Explanation after submit */}
         {submitted && (
-          <div className="mt-4 border-t pt-3">
-            <div className="text-sm font-semibold">
+          <div className="mt-4 rounded-lg border border-border bg-muted/30 p-4">
+            <div className="text-sm font-semibold text-muted-foreground mb-2">
               Correct answer: {displayKeyFor(q.id, q.answer)}
             </div>
-            <div className="mt-1 text-sm break-words [word-break:break-word]">
+            <div className="text-sm break-words [word-break:break-word] leading-relaxed">
               <MarkdownMath content={q.explanation_md} />
             </div>
           </div>
@@ -448,20 +436,21 @@ function InteractiveQuiz({
       {!submitted ? (
         isLast ? (
           <div className="flex justify-end">
-            <Button type="button" onClick={handleSubmitAll}>
-              Submit
+            <Button type="button" onClick={handleSubmitAll} className="cursor-pointer">
+              Submit answers
             </Button>
           </div>
         ) : null
       ) : (
-        <div className={`${WRAP_WIDTH} flex items-center justify-between`}>
-          <div className="flex gap-3">
-            <Button type="button" variant="outline" onClick={() => setSubmitted(false)}>
+        <div className={`${WRAP_WIDTH} flex flex-wrap items-center justify-between gap-3`}>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setSubmitted(false)} className="cursor-pointer">
               Review again
             </Button>
             <Button
               type="button"
               variant="outline"
+              size="sm"
               onClick={() => {
                 setSubmitted(false);
                 setResponses({});
@@ -469,11 +458,12 @@ function InteractiveQuiz({
                 setSubmitOk(false);
                 setSubmitError(null);
               }}
+              className="cursor-pointer"
             >
               Reset answers
             </Button>
           </div>
-          <Button type="button" variant="ghost" onClick={onNewPrompt}>
+          <Button type="button" variant="ghost" size="sm" onClick={onNewPrompt} className="cursor-pointer">
             New prompt
           </Button>
         </div>
@@ -587,19 +577,7 @@ export function PromptBox() {
   const count = form.watch("count");
   const promptValue = form.watch("prompt");
 
-  useEffect(() => {
-    if (!promptValue) return;
-    if (isLikelySTEM(promptValue) && form.formState.errors.prompt?.message === STEM_HELP) {
-      form.clearErrors("prompt");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [promptValue]);
-
   async function onSubmit(values: FormValues) {
-    if (!isLikelySTEM(values.prompt)) {
-      form.setError("prompt", { type: "manual", message: STEM_HELP });
-      return;
-    }
     if (!authUserId) {
       form.setError("prompt", { type: "manual", message: "Please sign in to generate and record your questions." });
       return;
@@ -624,7 +602,7 @@ export function PromptBox() {
 
       if (res.status === 422) {
         const data = await res.json();
-        form.setError("prompt", { type: "server", message: data?.error || STEM_HELP });
+        form.setError("prompt", { type: "server", message: data?.error || "Unable to generate questions from that prompt." });
         return;
       }
       if (!res.ok) throw new Error(await res.text());
@@ -653,21 +631,20 @@ export function PromptBox() {
     <Form {...form}>
       {showForm && (
         <form onSubmit={form.handleSubmit(onSubmit)}>
-          <Card className="w-full max-w-2xl p-4 bg-white rounded-lg border border-gray-200">
-            <CardHeader>
-              <CardTitle>Generate STEM Multiple-Choice Questions</CardTitle>
-              <CardDescription>
-                Describe the topic/level. We’ll generate multiple-choice (A–D) with answers. Some questions may include a graph when helpful.
+          <Card className="w-full max-w-2xl border shadow-sm bg-card/95 backdrop-blur-sm">
+            <CardHeader className="space-y-1.5 pb-2">
+              <CardTitle className="text-xl tracking-tight">Generate STEM Multiple-Choice Questions</CardTitle>
+              <CardDescription className="text-muted-foreground">
+                Describe the topic and level. We’ll generate multiple-choice (A–D) with answers. Some questions may include a graph when helpful.
               </CardDescription>
             </CardHeader>
 
-            <div className="px-4 space-y-4">
+            <div className="px-6 pb-6 space-y-5">
               <FormField
                 control={form.control}
                 name="prompt"
                 render={({ field }) => {
                   const promptErr = form.formState.errors.prompt?.message;
-                  const isStemError = promptErr === STEM_HELP;
                   return (
                     <FormItem>
                       <FormLabel>Prompt</FormLabel>
@@ -677,15 +654,14 @@ export function PromptBox() {
                           {...field}
                           onChange={(e) => {
                             field.onChange(e);
-                            if (form.formState.errors.prompt?.message === STEM_HELP) {
+                            if (form.formState.errors.prompt?.message) {
                               form.clearErrors("prompt");
                             }
                           }}
-                          className={[promptErr ? "border-red-500 focus-visible:ring-red-500" : ""].join(" ")}
+                          className={promptErr ? "border-destructive focus-visible:ring-destructive/50" : ""}
                         />
                       </FormControl>
-                      {!isStemError && <FormMessage />}
-                      {isStemError && <p className="text-sm text-red-600 mt-1">{STEM_HELP}</p>}
+                      <FormMessage />
                     </FormItem>
                   );
                 }}
@@ -700,7 +676,7 @@ export function PromptBox() {
                       form.setValue("prompt", s, { shouldValidate: true });
                       form.clearErrors("prompt");
                     }}
-                    className="text-sm px-2 py-1 rounded-full border hover:bg-gray-50"
+                    className="text-sm px-3 py-1.5 rounded-full border border-border bg-muted/50 hover:bg-accent hover:border-primary/30 transition-colors cursor-pointer"
                   >
                     {s}
                   </button>
@@ -733,12 +709,12 @@ export function PromptBox() {
                 )}
               />
 
-              <Button type="submit" className="mt-2" disabled={loading || !form.formState.isValid}>
-                {loading ? "Generating…" : "Submit"}
+              <Button type="submit" className="w-full sm:w-auto cursor-pointer" disabled={loading || !form.formState.isValid}>
+                {loading ? "Generating…" : "Generate questions"}
               </Button>
 
               {raw && (
-                <div className="mt-4 rounded-md border p-4 overflow-x-auto">
+                <div className="rounded-lg border border-border bg-muted/30 p-4 overflow-x-auto text-sm">
                   <MarkdownMath content={raw} />
                 </div>
               )}
@@ -748,7 +724,7 @@ export function PromptBox() {
       )}
 
       {quizItems && !showForm ? (
-        <div className="mt-4">
+        <div className="mt-6">
           <InteractiveQuiz
             items={quizItems}
             links={links}

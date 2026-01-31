@@ -3,6 +3,7 @@ import OpenAI, { APIError } from "openai";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
+import { createClient } from "@supabase/supabase-js";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -296,46 +297,6 @@ const MCQ_JSON_SCHEMA = {
   required: ["version", "questions"],
 } as const;
 
-/* ============================ STEM Gate (client still does heuristic) ============================ */
-
-const STEM_DOMAINS = new Set([
-  "mathematics","math","physics","chemistry","biology","earth_science","earth science",
-  "geology","astronomy","space_science","computer_science","computer science","cs",
-  "engineering","statistics","data_science",
-]);
-
-function quickIsLikelySTEM(s: string) {
-  const t = s.toLowerCase();
-  const hits = [
-    "math","maths","calculus","algebra","geometry","trigonometry","differentiation","integration","limit","series",
-    "probability","statistics","matrix","vector","complex number",
-    "physics","mechanics","electric","magnet","thermo","optics","quantum","kinematics",
-    "chemistry","stoichiometry","equilibrium","acid","base","redox","organic","bond",
-    "biology","genetics","cell","enzyme","ecology","evolution","physiology",
-    "geology","earth","plate tectonics","seismology","mineral",
-    "astronomy","astrophysics","cosmology","planet","orbit",
-    "computer","algorithm","data structure","complexity","programming","cs",
-    "engineering","circuit","signal","control","materials","mechanical","electrical",
-  ];
-  return hits.some((k) => t.includes(k));
-}
-
-async function classifyPromptWithModel(prompt: string) {
-  const classifierInstruction =
-    `Classify the user's prompt. Respond ONLY JSON:
-{"is_academic": boolean, "domain": string, "is_stem": boolean, "confidence": number}
-Prompt:
-"""${prompt}"""`;
-
-  const resp = await client.responses.create({
-    model: "o4-mini",
-    input: [{ role: "user", content: classifierInstruction }],
-    max_output_tokens: 200,
-  });
-
-  try { return JSON.parse((resp as any).output_text || "{}"); } catch { return undefined; }
-}
-
 /* ============================== Helpers (unchanged+small tweaks) ============================== */
 
 function getOutputText(resp: any) {
@@ -416,18 +377,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Please provide a brief description (≥5 chars)." }, { status: 400 });
     }
 
-    // --- STEM gate ---
-    let allow = quickIsLikelySTEM(prompt);
-    if (!allow) {
-      const cls = await classifyPromptWithModel(prompt);
-      if (cls?.is_academic && (cls?.is_stem || STEM_DOMAINS.has(String(cls?.domain ?? "").toLowerCase()))) {
-        allow = true;
-      }
-    }
-    if (!allow) {
-      return NextResponse.json({ error: "This endpoint only accepts academic STEM prompts." }, { status: 422 });
-    }
-
     // --- Generation prompt (same shape you already had) ---
     const system =
       "You are a careful STEM tutor. Generate high-quality multiple-choice (A–D) questions. " +
@@ -491,10 +440,51 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       const authUserId = body?.authUserId?.trim();
       if (!authUserId) return { links: [] as Array<{ localId: number; questionId: string; attemptId: string; answer: "A"|"B"|"C"|"D" }> };
 
-      const student = await prisma.student.findUnique({
+      let student = await prisma.student.findUnique({
         where: { authUserId },
-        select: { id: true },
+        select: { id: true, email: true, name: true },
       });
+
+      if (!student) {
+        try {
+          const supabase = createClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+          );
+          const { data: sbStudent } = await supabase
+            .from("Student")
+            .select("email, name")
+            .eq("authUserId", authUserId)
+            .maybeSingle();
+
+          if (sbStudent?.email) {
+            const name = sbStudent.name || sbStudent.email.split("@")[0];
+            try {
+              student = await prisma.student.create({
+                data: { authUserId, email: sbStudent.email, name },
+                select: { id: true, email: true, name: true },
+              });
+            } catch (createError: any) {
+              if (createError.code === "P2002") {
+                const existingByEmail = await prisma.student.findUnique({
+                  where: { email: sbStudent.email },
+                  select: { id: true, email: true, name: true, authUserId: true },
+                });
+                if (existingByEmail && !existingByEmail.authUserId) {
+                  student = await prisma.student.update({
+                    where: { email: sbStudent.email },
+                    data: { authUserId },
+                    select: { id: true, email: true, name: true },
+                  });
+                }
+              }
+            }
+          }
+        } catch {
+          // best effort; fall through if we still don't have a student
+        }
+      }
+
       if (!student) return { links: [] };
 
       const links: Array<{ localId: number; questionId: string; attemptId: string; answer: "A"|"B"|"C"|"D" }> = [];
