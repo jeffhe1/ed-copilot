@@ -6,7 +6,10 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "rag:smoke": "ts-node --skipProject --transpile-only --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\",\\\"target\\\":\\\"es2020\\\"}\" ./scripts/rag-smoke.ts",
+    "rag:typecheck": "npx tsc --noEmit --incremental false --pretty false",
+    "rag:typecheck:module": "npx tsc -p tsconfig.rag.json --pretty false"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.0.1",
