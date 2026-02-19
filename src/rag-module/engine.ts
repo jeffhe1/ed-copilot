@@ -1,8 +1,11 @@
 import { BM25Index } from "./bm25";
 import { textToDeterministicEmbedding } from "./embedding";
-import { rrfFuse } from "./fusion";
 import { buildFingerprints, parseQuestionsFromFile } from "./ingestion";
 import { rerankPairScore } from "./reranker";
+import { scoreDense } from "./scoring/dense";
+import { fuseHybridScores } from "./scoring/hybrid";
+import { scoreImage } from "./scoring/image";
+import { scoreSparse } from "./scoring/sparse";
 import type {
   EvalMetrics,
   EvalRecord,
@@ -24,6 +27,10 @@ const DEFAULT_CONFIG: RAGConfig = {
   denseTopK: 300,
   imageTopK: 300,
   rrfK: 60,
+  sparseWeight: 0.45,
+  denseWeight: 0.45,
+  imageWeight: 0.1,
+  rrfWeight: 0.15,
   rerankTopM: 200,
   finalTopN: 20,
   nearDuplicateThreshold: 0.85,
@@ -109,21 +116,24 @@ export class HybridQuestionRAG {
       };
     }
 
-    const bm25Raw = q ? this.bm25.search(q, topK) : [];
+    const bm25Hits = scoreSparse(this.bm25, q, topK, filteredQids);
     const qVector = q ? textToDeterministicEmbedding(q, this.config.denseDim) : [];
-    const stemRaw = qVector.length ? this.stemIndex.search(qVector, this.config.denseTopK) : [];
-    const explanationRaw = qVector.length ? this.explanationIndex.search(qVector, this.config.denseTopK) : [];
-    const denseRaw = this.maxMerge(stemRaw, explanationRaw, this.config.denseTopK);
+    const denseHits = scoreDense(
+      this.stemIndex,
+      this.explanationIndex,
+      qVector,
+      this.config.denseTopK,
+      filteredQids
+    );
+    const imageHits = scoreImage(
+      this.imageIndex,
+      this.imageOwner,
+      query.imageVector,
+      this.config.imageTopK,
+      filteredQids
+    );
 
-    const imageRaw = query.imageVector?.length
-      ? this.remapImageHits(this.imageIndex.search(query.imageVector, this.config.imageTopK))
-      : [];
-
-    const bm25Hits = bm25Raw.filter((x) => filteredQids.has(x.qid));
-    const denseHits = denseRaw.filter((x) => filteredQids.has(x.qid));
-    const imageHits = imageRaw.filter((x) => filteredQids.has(x.qid));
-
-    const fused = rrfFuse([bm25Hits, denseHits, imageHits], this.config.rrfK);
+    const fused = fuseHybridScores(bm25Hits, denseHits, imageHits, this.config);
     const rerankCandidates = fused.slice(0, topM);
 
     const reranked = rerankCandidates
@@ -135,7 +145,7 @@ export class HybridQuestionRAG {
         const rr = rerankPairScore(q, docText, denseScore, this.config.denseDim);
         return {
           qid: doc.qid,
-          score: cand.score,
+          score: cand.score, // hybrid fused score (weighted sparse+dense+image+rrf)
           rerankScore: rr,
           bm25Score: bm25Hits.find((x) => x.qid === doc.qid)?.score,
           denseScore,
@@ -383,32 +393,6 @@ export class HybridQuestionRAG {
     if (score >= this.config.nearDuplicateThreshold) return "near-duplicate";
     if (score >= 0.65) return "similar";
     return "related";
-  }
-
-  private maxMerge(
-    a: Array<{ qid: string; score: number }>,
-    b: Array<{ qid: string; score: number }>,
-    topK: number
-  ): Array<{ qid: string; score: number }> {
-    const map = new Map<string, number>();
-    for (const row of a) map.set(row.qid, Math.max(map.get(row.qid) ?? -1, row.score));
-    for (const row of b) map.set(row.qid, Math.max(map.get(row.qid) ?? -1, row.score));
-    return Array.from(map.entries())
-      .map(([qid, score]) => ({ qid, score }))
-      .sort((x, y) => y.score - x.score)
-      .slice(0, topK);
-  }
-
-  private remapImageHits(hits: Array<{ qid: string; score: number }>): Array<{ qid: string; score: number }> {
-    const byQuestion = new Map<string, number>();
-    for (const hit of hits) {
-      const qid = this.imageOwner.get(hit.qid);
-      if (!qid) continue;
-      byQuestion.set(qid, Math.max(byQuestion.get(qid) ?? -1, hit.score));
-    }
-    return Array.from(byQuestion.entries())
-      .map(([qid, score]) => ({ qid, score }))
-      .sort((a, b) => b.score - a.score);
   }
 
   private reasonText(row: {

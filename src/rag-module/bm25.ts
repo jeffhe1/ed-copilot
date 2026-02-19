@@ -12,9 +12,10 @@ type BM25Row = {
 
 export class BM25Index {
   private docs = new Map<string, string[]>();
-  private termFreq = new Map<string, Map<string, number>>();
-  private docFreq = new Map<string, number>();
+  private docLen = new Map<string, number>();
+  private inverted = new Map<string, Array<{ qid: string; tf: number }>>();
   private avgDocLen = 0;
+  private totalDocs = 0;
   private k1 = 1.2;
   private b = 0.75;
 
@@ -22,62 +23,66 @@ export class BM25Index {
     for (const row of rows) {
       const tokens = tokenize(row.text);
       this.docs.set(row.qid, tokens);
-
-      const tf = new Map<string, number>();
-      for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
-      this.termFreq.set(row.qid, tf);
     }
-    this.rebuildDocFreq();
+    this.rebuildInverted();
   }
 
   removeDocuments(qids: string[]): void {
     for (const qid of qids) {
       this.docs.delete(qid);
-      this.termFreq.delete(qid);
     }
-    this.rebuildDocFreq();
+    this.rebuildInverted();
   }
 
-  private rebuildDocFreq(): void {
-    this.docFreq.clear();
+  private rebuildInverted(): void {
+    this.inverted.clear();
+    this.docLen.clear();
     let totalLen = 0;
 
-    for (const [, tokens] of this.docs) {
+    for (const [qid, tokens] of this.docs) {
       totalLen += tokens.length;
-      const uniq = new Set(tokens);
-      for (const t of uniq) this.docFreq.set(t, (this.docFreq.get(t) ?? 0) + 1);
+      this.docLen.set(qid, tokens.length);
+
+      const tf = new Map<string, number>();
+      for (const token of tokens) tf.set(token, (tf.get(token) ?? 0) + 1);
+
+      for (const [term, count] of tf.entries()) {
+        const posting = this.inverted.get(term) ?? [];
+        posting.push({ qid, tf: count });
+        this.inverted.set(term, posting);
+      }
     }
 
-    this.avgDocLen = this.docs.size ? totalLen / this.docs.size : 0;
+    this.totalDocs = this.docs.size;
+    this.avgDocLen = this.totalDocs ? totalLen / this.totalDocs : 0;
   }
 
   search(query: string, topK: number): BM25Row[] {
     const qTokens = tokenize(query);
-    if (!qTokens.length || this.docs.size === 0) return [];
+    if (!qTokens.length || this.totalDocs === 0) return [];
 
-    const N = this.docs.size;
-    const scores: BM25Row[] = [];
+    const queryTerms = new Set(qTokens);
+    const scores = new Map<string, number>();
 
-    for (const [qid, tokens] of this.docs.entries()) {
-      const tf = this.termFreq.get(qid);
-      if (!tf) continue;
-      const dl = Math.max(tokens.length, 1);
-      let score = 0;
+    for (const term of queryTerms.values()) {
+      const posting = this.inverted.get(term);
+      if (!posting || posting.length === 0) continue;
 
-      for (const qt of qTokens) {
-        const f = tf.get(qt) ?? 0;
-        if (!f) continue;
-        const df = this.docFreq.get(qt) ?? 0;
-        const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
-        const numerator = f * (this.k1 + 1);
-        const denominator = f + this.k1 * (1 - this.b + this.b * (dl / Math.max(this.avgDocLen, 1)));
-        score += idf * (numerator / denominator);
+      const df = posting.length;
+      const idf = Math.log(1 + (this.totalDocs - df + 0.5) / (df + 0.5));
+
+      for (const { qid, tf } of posting) {
+        const dl = Math.max(this.docLen.get(qid) ?? 0, 1);
+        const numerator = tf * (this.k1 + 1);
+        const denominator = tf + this.k1 * (1 - this.b + this.b * (dl / Math.max(this.avgDocLen, 1)));
+        const add = idf * (numerator / denominator);
+        scores.set(qid, (scores.get(qid) ?? 0) + add);
       }
-
-      if (score > 0) scores.push({ qid, score });
     }
 
-    scores.sort((a, b) => b.score - a.score);
-    return scores.slice(0, topK);
+    return Array.from(scores.entries())
+      .map(([qid, score]) => ({ qid, score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
   }
 }

@@ -121,6 +121,10 @@ export type RAGConfig = {
   denseTopK: number;
   imageTopK: number;
   rrfK: number;
+  sparseWeight: number;
+  denseWeight: number;
+  imageWeight: number;
+  rrfWeight: number;
   rerankTopM: number;
   finalTopN: number;
   nearDuplicateThreshold: number;

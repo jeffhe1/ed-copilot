@@ -1,0 +1,13 @@
+# Core numeric acceleration
+numpy>=1.24
+
+# UI
+streamlit>=1.35
+
+# PDF text extraction
+PyMuPDF>=1.24
+pypdf>=4.2
+
+# OCR path for scanned PDFs (optional but recommended)
+pdf2image>=1.17
+pytesseract>=0.3.10
