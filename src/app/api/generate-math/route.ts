@@ -1,10 +1,39 @@
+
 import { NextResponse } from "next/server";
 import OpenAI, { APIError } from "openai";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { createClient } from "@supabase/supabase-js";
+// DeepSeek 通过 OpenAI SDK 兼容调用
+const deepseekClient = new OpenAI({
+  baseURL: "https://api.deepseek.com",
+  apiKey: process.env.DEEPSEEK_API_KEY,
+});
 
+import fetch from "node-fetch";
+import { HttpsProxyAgent } from "https-proxy-agent";
+const proxyUrl = 'http://127.0.0.1:7890';
+const agent = new HttpsProxyAgent(proxyUrl);
+
+async function callDeepSeek(messages: any[], max_tokens = 10000, model = "deepseek-reasoner") {
+  const completion = await deepseekClient.chat.completions.create({
+    messages,
+    model: model,
+    max_tokens,
+  });
+  return {
+    choices: [
+      {
+        message: {
+          content: completion.choices?.[0]?.message?.content || ""
+        }
+      }
+    ]
+  };
+}
+
+// 标准 OpenAI 客户端（无代理）
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* =============================== TAXONOMY (VCE-aligned) =============================== */
@@ -357,9 +386,32 @@ function normalizeItems(json: any): QuestionItem[] | undefined {
 }
 
 /* ================================= Handler ================================= */
+
 export async function POST(req: Request) {
+  // 打印 Node.js 进程代理环境变量
+  console.log("[generate-math] HTTPS_PROXY:", process.env.HTTPS_PROXY, "HTTP_PROXY:", process.env.HTTP_PROXY);
+  // ====== 网络连通性测试（等价 curl） ======
+try {
+  const openaiTestRes = await fetch("https://api.openai.com/v1/models", {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, // API Key
+    },
+    // 使用代理 Agent
+    agent: agent as any, // TS 的 fetch 类型不含 agent 这个字段，强制忽略
+  });
+
+  const openaiTestText = await openaiTestRes.text();
+  console.log("[generate-math] OpenAI API connectivity test status:", openaiTestRes.status);
+  console.log("[generate-math] OpenAI API connectivity test body:", openaiTestText.slice(0, 500));
+} catch (testErr) {
+  console.error("[generate-math] OpenAI API connectivity test failed:", testErr);
+}
+
+console.log("[generate-math] POST handler invoked");
   try {
     // The client sends these (PromptBox does it in the previous step)
+    console.log("[generate-math] Parsing request body...");
     const body = (await req.json()) as {
       prompt?: string;
       count?: number;
@@ -367,13 +419,17 @@ export async function POST(req: Request) {
       area?: string;         // optional taxonomy hints
       subject?: string;
       topic?: string;
+      model?: string;
     };
 
     const prompt = body?.prompt;
     const count = body?.count;
     const n = Number.isFinite(count) ? Math.max(1, Math.min(10, Number(count))) : 5;
+    const model = body?.model || "o4-mini";
+    console.log("[generate-math] prompt:", prompt, "model:", model);
 
     if (!prompt || prompt.trim().length < 5) {
+      console.log("[generate-math] Invalid prompt, aborting.");
       return NextResponse.json({ error: "Please provide a brief description (≥5 chars)." }, { status: 400 });
     }
 
@@ -419,24 +475,46 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       `Only include topics that exist in the taxonomy for the chosen subject. ` +
       `Return the fenced JSON FIRST. After the JSON you MAY include a readable Markdown copy for humans.`;
 
-    const gen = await client.responses.create({
-      model: "o4-mini",
-      input: [
+    // ========== 支持模型切换 =============
+    let gen: any;
+    if (model === "deepseek-chat" || model === "deepseek-reasoner") {
+      console.log("[generate-math] Using DeepSeek model:", model);
+      gen = await callDeepSeek([
         { role: "system", content: system },
         { role: "user", content: userContent },
-      ],
-      max_output_tokens: 10000,
-    });
+      ], 10000, model);
+      console.log("[generate-math] DeepSeek response received");
+    } else {
+      console.log("[generate-math] Using OpenAI model:", model);
+      gen = await client.responses.create({
+        model,
+        input: [
+          { role: "system", content: system },
+          { role: "user", content: userContent },
+        ],
+        max_output_tokens: 10000,
+      });
+      console.log("[generate-math] OpenAI response received");
+    }
 
-    const rawText = getOutputText(gen);
+    // DeepSeek 返回格式兼容
+    let rawText = "";
+    if (gen?.choices?.[0]?.message?.content) {
+      rawText = gen.choices[0].message.content;
+    } else {
+      rawText = getOutputText(gen);
+    }
+    console.log("[generate-math] rawText length:", rawText.length);
 
     // --- local extract + validate ---
     const extracted = extractQuestionsFromText(rawText);
     const localParsed = extracted ?? tryParseJson(rawText);
     const localCheck = localParsed ? Z_MCQ.safeParse(localParsed) : ({ success: false } as const);
+    console.log("[generate-math] localCheck.success:", localCheck.success);
 
     // Helper: persist + build links back to created rows
     const maybePersist = async (items: QuestionItem[]) => {
+      console.log("[generate-math] maybePersist called, items count:", items.length);
       const authUserId = body?.authUserId?.trim();
       if (!authUserId) return { links: [] as Array<{ localId: number; questionId: string; attemptId: string; answer: "A"|"B"|"C"|"D" }> };
 
@@ -529,6 +607,7 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
 
     // Fast path – local JSON is valid and taxonomy-compliant
     if (localCheck.success && localParsed!.questions.length === n) {
+      console.log("[generate-math] Fast path: local JSON valid and taxonomy-compliant");
       const allValid = localParsed!.questions.every((q: any) => isValidPath(q.area, q.subject, q.topic));
       if (allValid) {
         const items = normalizeItems(localParsed) ?? [];
@@ -541,6 +620,7 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
 
     // --- Repair/validate with model if needed ---
     const validatorPrompt =
+      // ...existing code...
       `Validate/repair the following into STRICT JSON that matches this schema and taxonomy. ` +
       `Reject/adjust any subject/topic that is outside the taxonomy by mapping to the closest valid one.\n\n` +
       `SCHEMA:\n${JSON.stringify(MCQ_JSON_SCHEMA, null, 2)}\n\n` +
@@ -548,17 +628,20 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       `ORIGINAL OUTPUT:\n${rawText}\n\n` +
       (localParsed ? `PARTIAL JSON:\n${JSON.stringify(localParsed).slice(0, 4000)}\n` : ``);
 
+    console.log("[generate-math] Running OpenAI validator for schema repair...");
     const val = await client.responses.create({
       model: "o4-mini",
       input: [{ role: "user", content: validatorPrompt }],
       max_output_tokens: 10000,
     });
+    console.log("[generate-math] Validator response received");
 
     const valText = (val as any).output_text as string | undefined;
     const valJson = valText ? tryParseJson(valText) : undefined;
     const finalCheck = valJson ? Z_MCQ.safeParse(valJson) : ({ success: false } as const);
 
     if (finalCheck.success) {
+      console.log("[generate-math] Validator fixed output is valid");
       const fixed = { ...valJson } as any;
       if (Array.isArray(fixed.questions)) {
         fixed.questions = fixed.questions
@@ -575,9 +658,9 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
     return NextResponse.json({ error: "Could not normalize output to schema." }, { status: 200 });
   } catch (err: any) {
     if (err instanceof APIError) {
-      return NextResponse.json({ error: "Upstream API error.", detail: err.error?.message }, { status: err.status ?? 500 });
+      return NextResponse.json({ error: "Upstream API error.", detail: err.error?.message, stack: err.stack }, { status: err.status ?? 500 });
     }
     console.error("generate-math error:", err);
-    return NextResponse.json({ error: err?.message ?? "Unexpected error" }, { status: 500 });
+    return NextResponse.json({ error: err?.message ?? "Unexpected error", stack: err?.stack, raw: err }, { status: 500 });
   }
 }

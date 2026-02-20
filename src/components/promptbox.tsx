@@ -593,11 +593,11 @@ export function PromptBox() {
       setQuizItems(undefined);
       setLinks([]);
       setRaw("");
-
+      let model = 'chat_gpt';
       const res = await fetch("/api/generate-math", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...values, authUserId, area, subject, topic }),
+        body: JSON.stringify({ ...values, authUserId, area, subject, topic, model }),
       });
 
       if (res.status === 422) {
