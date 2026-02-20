@@ -4,7 +4,7 @@ import json
 import math
 import time
 from dataclasses import asdict
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 
 from .bm25 import BM25Index
@@ -245,22 +245,26 @@ class HybridQuestionRAGPy:
     def _normalize_input(self, inp: IngestionInput) -> List[QuestionDocument]:
         out: List[QuestionDocument] = []
         for i, row in enumerate(inp.questions or []):
-            qid = row.get("qid") or f"q_{stable_hash(f'{row.get('stem', '')}:{i}')}"
-            options = list(row.get("options") or [])
+            stem = self._resolve_stem(row)
+            qid = row.get("qid") or (f"q_{row.get('id')}" if row.get("id") is not None else f"q_{stable_hash(f'{stem}:{i}')}")
+            options = self._normalize_options(row.get("options"))
+            explanation = self._resolve_explanation(row)
+            answer = self._normalize_answer(row.get("answer"))
             images = self._normalize_images(row.get("images") or [], qid)
+            metadata = self._normalize_metadata(row)
             out.append(
                 QuestionDocument(
                     qid=qid,
-                    stem=str(row.get("stem", "")).strip(),
+                    stem=stem,
                     options=options,
-                    answer=row.get("answer"),
-                    explanation=row.get("explanation"),
+                    answer=answer,
+                    explanation=explanation,
                     images=images,
                     tags=list(row.get("tags") or []),
-                    metadata=dict(row.get("metadata") or {}),
+                    metadata=metadata,
                     fingerprints={
-                        "exact_hash": build_exact_hash(str(row.get("stem", "")), options, row.get("answer")),
-                        "template_hash": build_template_hash(str(row.get("stem", ""))),
+                        "exact_hash": build_exact_hash(stem, options, answer),
+                        "template_hash": build_template_hash(stem),
                     },
                 )
             )
@@ -268,7 +272,10 @@ class HybridQuestionRAGPy:
         for file_row in inp.files or []:
             parsed = parse_questions_from_file(file_row)
             for p in parsed:
-                qid = f"q_{stable_hash(f'{file_row.get('fileId', 'f')}:{p.get('source_question_no')}:{p.get('stem', '')}')}"
+                file_id = file_row.get("fileId", "f")
+                question_no = p.get("source_question_no")
+                stem_text = p.get("stem", "")
+                qid = f"q_{stable_hash(f'{file_id}:{question_no}:{stem_text}')}"
                 out.append(
                     QuestionDocument(
                         qid=qid,
@@ -290,6 +297,42 @@ class HybridQuestionRAGPy:
                     )
                 )
         return out
+
+    def _resolve_stem(self, row: dict) -> str:
+        return str(row.get("stem") or row.get("stem_md") or "").strip()
+
+    def _resolve_explanation(self, row: dict) -> Optional[str]:
+        value = row.get("explanation")
+        if value is None:
+            value = row.get("explanation_md")
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _normalize_options(self, options: Any) -> List[str]:
+        if isinstance(options, dict):
+            return [str(options[k]).strip() for k in ("A", "B", "C", "D") if k in options and str(options[k]).strip()]
+        if isinstance(options, list):
+            return [str(x).strip() for x in options if str(x).strip()]
+        return []
+
+    def _normalize_answer(self, answer: Any) -> Optional[str]:
+        if answer is None:
+            return None
+        text = str(answer).strip().upper()
+        return text or None
+
+    def _normalize_metadata(self, row: dict) -> Dict[str, Any]:
+        metadata = dict(row.get("metadata") or {})
+        if row.get("id") is not None and "source_id" not in metadata:
+            metadata["source_id"] = row.get("id")
+        for key in ("area", "subject", "topic", "difficulty"):
+            if row.get(key) is not None and key not in metadata:
+                metadata[key] = row.get(key)
+        if isinstance(row.get("skillIds"), list) and "skillIds" not in metadata:
+            metadata["skillIds"] = list(row.get("skillIds") or [])
+        return metadata
 
     def _normalize_images(self, rows: list[dict], qid: str) -> List[QuestionImage]:
         out: List[QuestionImage] = []

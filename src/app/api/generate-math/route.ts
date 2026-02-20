@@ -5,16 +5,13 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { createClient } from "@supabase/supabase-js";
+import { spawn } from "node:child_process";
+import path from "node:path";
 // DeepSeek 通过 OpenAI SDK 兼容调用
 const deepseekClient = new OpenAI({
   baseURL: "https://api.deepseek.com",
   apiKey: process.env.DEEPSEEK_API_KEY,
 });
-
-import fetch from "node-fetch";
-import { HttpsProxyAgent } from "https-proxy-agent";
-const proxyUrl = 'http://127.0.0.1:7890';
-const agent = new HttpsProxyAgent(proxyUrl);
 
 async function callDeepSeek(messages: any[], max_tokens = 10000, model = "deepseek-reasoner") {
   const completion = await deepseekClient.chat.completions.create({
@@ -33,7 +30,6 @@ async function callDeepSeek(messages: any[], max_tokens = 10000, model = "deepse
   };
 }
 
-// 标准 OpenAI 客户端（无代理）
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* =============================== TAXONOMY (VCE-aligned) =============================== */
@@ -385,29 +381,39 @@ function normalizeItems(json: any): QuestionItem[] | undefined {
   })).filter((q: { area: string; subject: string; topic: string; }) => isValidPath(q.area, q.subject, q.topic)); // drop invalid paths defensively
 }
 
+async function persistToLocalRagBank(items: QuestionItem[]) {
+  if (!items.length) return;
+  const scriptPath = path.join(process.cwd(), "scripts", "ingest_generated_questions.py");
+  const bankPath = path.join(process.cwd(), "data", "paper_extract_bank.jsonl");
+  const payload = JSON.stringify({ version: 1, questions: items });
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("python", [scriptPath, "--bank", bankPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: process.cwd(),
+    });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(stderr || `Python ingestion exited with code ${code}`));
+    });
+
+    child.stdin.write(payload);
+    child.stdin.end();
+  });
+}
+
 /* ================================= Handler ================================= */
 
 export async function POST(req: Request) {
-  // 打印 Node.js 进程代理环境变量
-  console.log("[generate-math] HTTPS_PROXY:", process.env.HTTPS_PROXY, "HTTP_PROXY:", process.env.HTTP_PROXY);
-  // ====== 网络连通性测试（等价 curl） ======
-try {
-  const openaiTestRes = await fetch("https://api.openai.com/v1/models", {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, // API Key
-    },
-    // 使用代理 Agent
-    agent: agent as any, // TS 的 fetch 类型不含 agent 这个字段，强制忽略
-  });
-
-  const openaiTestText = await openaiTestRes.text();
-  console.log("[generate-math] OpenAI API connectivity test status:", openaiTestRes.status);
-  console.log("[generate-math] OpenAI API connectivity test body:", openaiTestText.slice(0, 500));
-} catch (testErr) {
-  console.error("[generate-math] OpenAI API connectivity test failed:", testErr);
-}
-
 console.log("[generate-math] POST handler invoked");
   try {
     // The client sends these (PromptBox does it in the previous step)
@@ -507,7 +513,9 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
     console.log("[generate-math] rawText length:", rawText.length);
 
     // --- local extract + validate ---
+    // console.log(rawText);
     const extracted = extractQuestionsFromText(rawText);
+    // console.log("extracted:", extracted);
     const localParsed = extracted ?? tryParseJson(rawText);
     const localCheck = localParsed ? Z_MCQ.safeParse(localParsed) : ({ success: false } as const);
     console.log("[generate-math] localCheck.success:", localCheck.success);
@@ -612,6 +620,11 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       if (allValid) {
         const items = normalizeItems(localParsed) ?? [];
         if (items.length) {
+          try {
+            await persistToLocalRagBank(items);
+          } catch (ingestErr: any) {
+            console.error("[generate-math] Local RAG ingest failed:", ingestErr?.message ?? ingestErr);
+          }
           const { links } = await maybePersist(items);
           return NextResponse.json({ items, links });
         }
@@ -629,11 +642,20 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       (localParsed ? `PARTIAL JSON:\n${JSON.stringify(localParsed).slice(0, 4000)}\n` : ``);
 
     console.log("[generate-math] Running OpenAI validator for schema repair...");
-    const val = await client.responses.create({
-      model: "o4-mini",
-      input: [{ role: "user", content: validatorPrompt }],
-      max_output_tokens: 10000,
-    });
+
+    let val: any;
+    if (model === "deepseek-chat" || model === "deepseek-reasoner") {
+      val = await callDeepSeek([
+        { role: "user", content: validatorPrompt },
+      ], 10000, model);
+    } 
+    else {
+      val = await client.responses.create({
+        model: "o4-mini",
+        input: [{ role: "user", content: validatorPrompt }],
+        max_output_tokens: 10000,
+      });
+    }
     console.log("[generate-math] Validator response received");
 
     const valText = (val as any).output_text as string | undefined;
@@ -650,6 +672,11 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       }
       const items = normalizeItems(fixed) ?? [];
       if (items.length) {
+        try {
+          await persistToLocalRagBank(items);
+        } catch (ingestErr: any) {
+          console.error("[generate-math] Local RAG ingest failed:", ingestErr?.message ?? ingestErr);
+        }
         const { links } = await maybePersist(items);
         return NextResponse.json({ items, links });
       }

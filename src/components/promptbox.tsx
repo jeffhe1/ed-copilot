@@ -593,7 +593,7 @@ export function PromptBox() {
       setQuizItems(undefined);
       setLinks([]);
       setRaw("");
-      let model = 'chat_gpt';
+      let model = 'deepseek-reasoner';
       const res = await fetch("/api/generate-math", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

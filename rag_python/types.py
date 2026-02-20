@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 
 DuplicateClass = Literal["duplicate", "near-duplicate", "similar", "related"]
@@ -31,6 +31,33 @@ class QuestionDocument:
     source: Optional[Dict[str, Any]] = None
 
 
+class MCQOptions(TypedDict):
+    A: str
+    B: str
+    C: str
+    D: str
+
+
+@dataclass
+class GeneratedQuestion:
+    id: int
+    stem_md: str
+    options: MCQOptions
+    answer: Optional[str] = None
+    explanation_md: Optional[str] = None
+    area: Optional[str] = None
+    subject: Optional[str] = None
+    topic: Optional[str] = None
+    skillIds: List[str] = field(default_factory=list)
+    difficulty: Optional[int] = None
+
+
+@dataclass
+class GeneratedQuestionPayload:
+    version: int = 1
+    questions: List[GeneratedQuestion] = field(default_factory=list)
+
+
 @dataclass
 class IngestedQuestion:
     question: QuestionDocument
@@ -41,6 +68,7 @@ class IngestedQuestion:
 
 @dataclass
 class IngestionInput:
+    version: Optional[int] = None
     questions: List[Dict[str, Any]] = field(default_factory=list)
     files: List[Dict[str, Any]] = field(default_factory=list)
 
