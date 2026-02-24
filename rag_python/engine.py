@@ -246,10 +246,15 @@ class HybridQuestionRAGPy:
         out: List[QuestionDocument] = []
         for i, row in enumerate(inp.questions or []):
             stem = self._resolve_stem(row)
-            qid = row.get("qid") or (f"q_{row.get('id')}" if row.get("id") is not None else f"q_{stable_hash(f'{stem}:{i}')}")
             options = self._normalize_options(row.get("options"))
             explanation = self._resolve_explanation(row)
             answer = self._normalize_answer(row.get("answer"))
+            # Do not derive qid from local numeric id (e.g. 1..5), which can overwrite existing rows.
+            # If qid is absent, derive a stable hash from content.
+            qid = row.get("qid")
+            if not qid:
+                signature = f"{stem}|{options}|{answer or ''}|{i}"
+                qid = f"q_{stable_hash(signature)}"
             images = self._normalize_images(row.get("images") or [], qid)
             metadata = self._normalize_metadata(row)
             out.append(
@@ -332,6 +337,9 @@ class HybridQuestionRAGPy:
                 metadata[key] = row.get(key)
         if isinstance(row.get("skillIds"), list) and "skillIds" not in metadata:
             metadata["skillIds"] = list(row.get("skillIds") or [])
+        # Preserve render payload for later retrieval UI.
+        if row.get("graph") is not None and "graph" not in metadata:
+            metadata["graph"] = row.get("graph")
         return metadata
 
     def _normalize_images(self, rows: list[dict], qid: str) -> List[QuestionImage]:

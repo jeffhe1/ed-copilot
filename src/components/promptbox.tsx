@@ -61,7 +61,19 @@ type QuizItem = {
 
 type ApiResponse =
   | { items?: undefined; links?: any; raw?: unknown; error?: string }
-  | { items: QuizItem[]; links?: any; raw?: unknown }
+  | {
+      items: QuizItem[];
+      links?: any;
+      raw?: unknown;
+      ragIngest?: {
+        received?: number;
+        inserted?: number;
+        duplicates?: number;
+        saved?: number;
+        bank?: string;
+        error?: string;
+      };
+    }
   | any;
 
 type LinkMap = { localId: number; questionId: string; attemptId: string; answer: "A" | "B" | "C" | "D" };
@@ -158,7 +170,12 @@ export function MarkdownMath({ content }: { content: string }) {
 
 /* =============================== Graph Renderer ============================ */
 
-const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
+import type { PlotParams } from "react-plotly.js";
+
+const Plot = dynamic<PlotParams>(
+  () => import("react-plotly.js"),
+  { ssr: false }
+);
 
 function GraphRenderer({ graph }: { graph: GraphSpec }) {
   const data = useMemo(() => {
@@ -547,6 +564,14 @@ export function PromptBox() {
   const [loading, setLoading] = useState(false);
   const [quizItems, setQuizItems] = useState<QuizItem[] | undefined>(undefined);
   const [links, setLinks] = useState<LinkMap[]>([]);
+  const [ragIngest, setRagIngest] = useState<{
+    received?: number;
+    inserted?: number;
+    duplicates?: number;
+    saved?: number;
+    bank?: string;
+    error?: string;
+  } | null>(null);
   const [raw, setRaw] = useState<string>("");
   const [showForm, setShowForm] = useState(true);
   const [authUserId, setAuthUserId] = useState<string | null>(null);
@@ -592,8 +617,9 @@ export function PromptBox() {
       setLoading(true);
       setQuizItems(undefined);
       setLinks([]);
+      setRagIngest(null);
       setRaw("");
-      let model = 'deepseek-reasoner';
+      let model = 'o4-mini';
       const res = await fetch("/api/generate-math", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -609,9 +635,19 @@ export function PromptBox() {
 
       const data: ApiResponse = await res.json();
 
+      if ((data as any)?.error && !Array.isArray((data as any)?.items)) {
+        const issues = Array.isArray((data as any)?.validationIssues) ? (data as any).validationIssues : [];
+        const issueText = issues.length
+          ? "\n" + issues.map((it: any) => `- ${it.path || "<root>"}: ${it.message}`).join("\n")
+          : "";
+        setRaw(`${String((data as any).error)}${issueText}`);
+        return;
+      }
+
       // ✅ capture links; fall back to []
       const gotLinks = Array.isArray((data as any).links) ? ((data as any).links as LinkMap[]) : [];
       setLinks(gotLinks);
+      setRagIngest((data as any).ragIngest ?? null);
 
       const items = extractItemsFromPayload(data);
       if (items && items.length) {
@@ -732,12 +768,26 @@ export function PromptBox() {
             onNewPrompt={() => {
               setQuizItems(undefined);
               setLinks([]);
+              setRagIngest(null);
               setRaw("");
               setShowForm(true);
               form.reset({ prompt: "", count: form.getValues("count") });
               form.clearErrors("prompt");
             }}
           />
+          {ragIngest ? (
+            <div className="mt-4 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm">
+              {ragIngest.error ? (
+                <div className="text-destructive">
+                  Local RAG ingest failed: {ragIngest.error}
+                </div>
+              ) : (
+                <div>
+                  已入库 {ragIngest.inserted ?? 0} 条（重复 {ragIngest.duplicates ?? 0} 条）
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </Form>

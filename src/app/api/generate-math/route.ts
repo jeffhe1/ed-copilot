@@ -340,6 +340,15 @@ function getOutputText(resp: any) {
 function tryParseJson<T = any>(s: string) { try { return JSON.parse(s); } catch { return undefined; } }
 function scrubJsonLike(s: string) { return s.replace(/\uFEFF/g, "").replace(/^[\s`]+|[\s`]+$/g, ""); }
 function stripTrailingCommas(json: string) { return json.replace(/,\s*([}\]])/g, "$1"); }
+function formatZodIssues(error: z.ZodError) {
+  return error.issues.map((issue) => ({
+    path: issue.path.join("."),
+    message: issue.message,
+    code: issue.code,
+    expected: (issue as any).expected,
+    received: (issue as any).received,
+  }));
+}
 function extractQuestionsFromText(full: string) {
   if (!full) return undefined;
   let m = full.match(/```(?:json|jsonc)?\s*([\s\S]*?)```/i) || full.match(/```+\s*([\s\S]*?)```+/);
@@ -381,26 +390,63 @@ function normalizeItems(json: any): QuestionItem[] | undefined {
   })).filter((q: { area: string; subject: string; topic: string; }) => isValidPath(q.area, q.subject, q.topic)); // drop invalid paths defensively
 }
 
-async function persistToLocalRagBank(items: QuestionItem[]) {
-  if (!items.length) return;
+type RagIngestStats = {
+  received: number;
+  inserted: number;
+  duplicates: number;
+  saved: number;
+  bank: string;
+};
+
+async function persistToLocalRagBank(items: QuestionItem[]): Promise<RagIngestStats> {
+  if (!items.length) {
+    return {
+      received: 0,
+      inserted: 0,
+      duplicates: 0,
+      saved: 0,
+      bank: path.join(process.cwd(), "data", "paper_extract_bank.jsonl"),
+    };
+  }
   const scriptPath = path.join(process.cwd(), "scripts", "ingest_generated_questions.py");
   const bankPath = path.join(process.cwd(), "data", "paper_extract_bank.jsonl");
   const payload = JSON.stringify({ version: 1, questions: items });
 
-  await new Promise<void>((resolve, reject) => {
+  return await new Promise<RagIngestStats>((resolve, reject) => {
     const child = spawn("python", [scriptPath, "--bank", bankPath], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: process.cwd(),
     });
 
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) {
-        resolve();
+        try {
+          const parsed = JSON.parse(stdout || "{}");
+          resolve({
+            received: Number(parsed?.received ?? items.length),
+            inserted: Number(parsed?.inserted ?? 0),
+            duplicates: Number(parsed?.duplicates ?? 0),
+            saved: Number(parsed?.saved ?? 0),
+            bank: String(parsed?.bank ?? bankPath),
+          });
+        } catch {
+          resolve({
+            received: items.length,
+            inserted: 0,
+            duplicates: 0,
+            saved: 0,
+            bank: bankPath,
+          });
+        }
         return;
       }
       reject(new Error(stderr || `Python ingestion exited with code ${code}`));
@@ -620,13 +666,24 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       if (allValid) {
         const items = normalizeItems(localParsed) ?? [];
         if (items.length) {
+          let ragIngest:
+            | (RagIngestStats & { error?: string })
+            | null = null;
           try {
-            await persistToLocalRagBank(items);
+            ragIngest = await persistToLocalRagBank(items);
           } catch (ingestErr: any) {
             console.error("[generate-math] Local RAG ingest failed:", ingestErr?.message ?? ingestErr);
+            ragIngest = {
+              received: items.length,
+              inserted: 0,
+              duplicates: 0,
+              saved: 0,
+              bank: path.join(process.cwd(), "data", "paper_extract_bank.jsonl"),
+              error: String(ingestErr?.message ?? ingestErr),
+            };
           }
           const { links } = await maybePersist(items);
-          return NextResponse.json({ items, links });
+          return NextResponse.json({ items, links, ragIngest });
         }
       }
     }
@@ -641,13 +698,14 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       `ORIGINAL OUTPUT:\n${rawText}\n\n` +
       (localParsed ? `PARTIAL JSON:\n${JSON.stringify(localParsed).slice(0, 4000)}\n` : ``);
 
-    console.log("[generate-math] Running OpenAI validator for schema repair...");
+    
 
     let val: any;
     if (model === "deepseek-chat" || model === "deepseek-reasoner") {
       val = await callDeepSeek([
         { role: "user", content: validatorPrompt },
       ], 10000, model);
+      console.log("[generate-math] Running DeepSeek validator for schema repair...");
     } 
     else {
       val = await client.responses.create({
@@ -655,14 +713,18 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
         input: [{ role: "user", content: validatorPrompt }],
         max_output_tokens: 10000,
       });
+      console.log("[generate-math] Running OpenAI validator for schema repair...");
     }
     console.log("[generate-math] Validator response received");
-
+    console.log(
+      "[generate-math] Validator raw response:",
+      JSON.stringify(val, null, 2)
+    );
     const valText = (val as any).output_text as string | undefined;
     const valJson = valText ? tryParseJson(valText) : undefined;
-    const finalCheck = valJson ? Z_MCQ.safeParse(valJson) : ({ success: false } as const);
-
-    if (finalCheck.success) {
+    const finalCheck = valJson ? Z_MCQ.safeParse(valJson) : null;
+    console.log('valJson formatted:\n', JSON.stringify(valJson, null, 2));
+    if (finalCheck?.success) {
       console.log("[generate-math] Validator fixed output is valid");
       const fixed = { ...valJson } as any;
       if (Array.isArray(fixed.questions)) {
@@ -672,13 +734,44 @@ TOPICS = ${JSON.stringify(TOPICS)}`;
       }
       const items = normalizeItems(fixed) ?? [];
       if (items.length) {
+        let ragIngest:
+          | (RagIngestStats & { error?: string })
+          | null = null;
         try {
-          await persistToLocalRagBank(items);
+          ragIngest = await persistToLocalRagBank(items);
         } catch (ingestErr: any) {
           console.error("[generate-math] Local RAG ingest failed:", ingestErr?.message ?? ingestErr);
+          ragIngest = {
+            received: items.length,
+            inserted: 0,
+            duplicates: 0,
+            saved: 0,
+            bank: path.join(process.cwd(), "data", "paper_extract_bank.jsonl"),
+            error: String(ingestErr?.message ?? ingestErr),
+          };
         }
         const { links } = await maybePersist(items);
-        return NextResponse.json({ items, links });
+        return NextResponse.json({ items, links, ragIngest });
+      }
+    }
+    else {
+      console.log("[generate-math] Validator failed to produce valid output");
+      if (valJson && finalCheck && !finalCheck.success) {
+        const validationIssues = formatZodIssues(finalCheck.error);
+        console.warn(
+          "[generate-math] Validator JSON schema issues count:",
+          validationIssues.length
+        );
+        console.warn("[generate-math] Validator JSON schema issues:", validationIssues);
+        return NextResponse.json(
+          {
+            error: "Validator output failed schema validation.",
+            validationIssuesCount: validationIssues.length,
+            validationIssues,
+            validatorTextPreview: String(valText ?? "").slice(0, 1200),
+          },
+          { status: 200 }
+        );
       }
     }
 

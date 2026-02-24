@@ -1,4 +1,6 @@
 import { PromptBox } from "@/components/promptbox";
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
 
 export default function AppPage() {
   return (
@@ -13,6 +15,11 @@ export default function AppPage() {
               Describe the topic and level, then generate a quiz with answers, explanations, and
               optional graphs.
             </p>
+            <div>
+              <Button asChild variant="outline" size="sm">
+                <Link href="/app/search">Search existing questions</Link>
+              </Button>
+            </div>
           </div>
           <div className="w-full max-w-[760px]">
             <PromptBox />

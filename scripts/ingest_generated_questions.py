@@ -35,15 +35,19 @@ def main() -> int:
     rag.load_local_bank(bank_path)
     ingested = rag.ingest({"version": payload.get("version"), "questions": questions})
     saved = rag.save_local_bank(bank_path)
+    inserted = sum(1 for row in ingested if row.status == "new")
+    duplicates = sum(1 for row in ingested if row.status in ("exact-duplicate", "near-duplicate"))
 
     print(
         json.dumps(
             {
-                "ingested": len(ingested),
+                "received": len(questions),
+                "inserted": inserted,
+                "duplicates": duplicates,
                 "saved": saved,
                 "bank": bank_path,
             },
-            ensure_ascii=False,
+            ensure_ascii=True,
         )
     )
     return 0
