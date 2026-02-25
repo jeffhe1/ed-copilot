@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import { LandingCtaButtons } from "@/components/LandingCtaButtons";
 
 export default function Home() {
   return (
@@ -19,14 +20,7 @@ export default function Home() {
                 questions with explanations, graphs, and performance analytics.
               </p>
             </div>
-            <div className="flex flex-wrap gap-3">
-              <Button asChild>
-                <Link href="/app">Open the app</Link>
-              </Button>
-              <Button asChild variant="outline">
-                <Link href="/login">Sign in</Link>
-              </Button>
-            </div>
+            <LandingCtaButtons />
             <div className="flex flex-wrap gap-6 text-sm text-muted-foreground">
               <div>
                 <div className="text-foreground font-semibold">Instant generation</div>
