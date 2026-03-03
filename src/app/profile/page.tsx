@@ -199,13 +199,7 @@ export default function ProfilePage() {
     <main className="flex-1 page-bg min-h-0">
       <div className="mx-auto max-w-5xl px-4 sm:px-6 py-8 sm:py-10">
         <div className="space-y-6">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">Your profile</h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              Review your learning progress and performance by subject.
-            </p>
-          </div>
-
+        
           {loadingUser ? (
             <div className="rounded-2xl border border-border bg-card p-6 shadow-sm space-y-4">
               <div className="h-5 w-40 animate-pulse rounded-md bg-muted" />
@@ -227,28 +221,29 @@ export default function ProfilePage() {
             </div>
           ) : (
             <div className="space-y-8">
-              <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <h2 className="text-xl font-semibold tracking-tight truncate">
-                      {student?.name || "Student"}
-                    </h2>
-                    <p className="text-sm text-muted-foreground mt-1 break-all">
-                      {student?.email || "—"}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" size="sm" onClick={handleRefresh}>
-                      {refreshing ? "Refreshing..." : "Refresh"}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => supabase.auth.signOut()}
-                    >
-                      Sign out
-                    </Button>
-                  </div>
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight truncate">
+                    {student?.name || "Student"}
+                  </h1>
+                  <p className="text-sm text-muted-foreground mt-1 break-all">
+                    {student?.email || "—"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button asChild size="sm">
+                    <Link href="/app">Open the app</Link>
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleRefresh}>
+                    {refreshing ? "Refreshing..." : "Refresh"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => supabase.auth.signOut()}
+                  >
+                    Sign out
+                  </Button>
                 </div>
               </div>
 

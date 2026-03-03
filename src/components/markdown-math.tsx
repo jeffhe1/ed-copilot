@@ -14,7 +14,7 @@ export default function MarkdownMath({ content }: Props) {
       <ReactMarkdown
         // GitHub tables/lists + LaTeX ($...$, $$...$$)
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
       >
         {content}
       </ReactMarkdown>

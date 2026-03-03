@@ -136,6 +136,9 @@ export function SearchQuestionBox() {
         }),
       });
       const data = await res.json();
+      // #region agent log
+      console.log("[search-rag] API response", { ok: res.ok, status: res.status, data });
+      // #endregion
       if (!res.ok) {
         throw new Error(data?.error || "Search failed");
       }

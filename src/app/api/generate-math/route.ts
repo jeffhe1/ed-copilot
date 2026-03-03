@@ -368,26 +368,42 @@ function extractQuestionsFromText(full: string) {
   }
   return undefined;
 }
+/** Wrap bare display-style LaTeX (no $$) in $$...$$ so remark-math + KaTeX render it. */
+function ensureMathDelimiters(text: string): string {
+  const t = text.trim();
+  if (!t || t.includes("$$")) return text;
+  const hasDisplayMath =
+    /\\(?:displaystyle|int|sum|frac|big[lr]|Big[lr]?|bigg[lr]?|Bigg[lr]?|begin\s*\{)/.test(t);
+  if (!hasDisplayMath) return text;
+  // Only wrap if content looks like a single display block (starts with \ or with optional space then \)
+  if (/^\s*\\/.test(t)) return `$$${t}$$`;
+  return text;
+}
+
 function normalizeItems(json: any): QuestionItem[] | undefined {
   if (!json?.questions || !Array.isArray(json.questions)) return undefined;
-  return json.questions.map((q: any, i: number) => ({
-    id: Number.isFinite(q?.id) ? Number(q.id) : i + 1,
-    stem_md: String(q?.stem_md ?? "").trim(),
-    options: {
-      A: String(q?.options?.A ?? "").trim(),
-      B: String(q?.options?.B ?? "").trim(),
-      C: String(q?.options?.C ?? "").trim(),
-      D: String(q?.options?.D ?? "").trim(),
-    },
-    answer: (String(q?.answer ?? "A").toUpperCase() as "A" | "B" | "C" | "D"),
-    explanation_md: String(q?.explanation_md ?? "").trim(),
-    graph: q?.graph,
-    area: (q?.area ?? "Mathematics") as Area,
-    subject: String(q?.subject ?? "Algebra"),
-    topic: String(q?.topic ?? "Linear Equations"),
-    skillIds: Array.isArray(q?.skillIds) ? q.skillIds.map((s: any) => String(s)) : undefined,
-    difficulty: Number.isFinite(q?.difficulty) ? Number(q.difficulty) : undefined,
-  })).filter((q: { area: string; subject: string; topic: string; }) => isValidPath(q.area, q.subject, q.topic)); // drop invalid paths defensively
+  return json.questions.map((q: any, i: number) => {
+    const stem_md = ensureMathDelimiters(String(q?.stem_md ?? "").trim());
+    const explanation_md = ensureMathDelimiters(String(q?.explanation_md ?? "").trim());
+    return {
+      id: Number.isFinite(q?.id) ? Number(q.id) : i + 1,
+      stem_md,
+      options: {
+        A: ensureMathDelimiters(String(q?.options?.A ?? "").trim()),
+        B: ensureMathDelimiters(String(q?.options?.B ?? "").trim()),
+        C: ensureMathDelimiters(String(q?.options?.C ?? "").trim()),
+        D: ensureMathDelimiters(String(q?.options?.D ?? "").trim()),
+      },
+      answer: (String(q?.answer ?? "A").toUpperCase() as "A" | "B" | "C" | "D"),
+      explanation_md,
+      graph: q?.graph,
+      area: (q?.area ?? "Mathematics") as Area,
+      subject: String(q?.subject ?? "Algebra"),
+      topic: String(q?.topic ?? "Linear Equations"),
+      skillIds: Array.isArray(q?.skillIds) ? q.skillIds.map((s: any) => String(s)) : undefined,
+      difficulty: Number.isFinite(q?.difficulty) ? Number(q.difficulty) : undefined,
+    };
+  }).filter((q: { area: string; subject: string; topic: string; }) => isValidPath(q.area, q.subject, q.topic)); // drop invalid paths defensively
 }
 
 type RagIngestStats = {
@@ -489,6 +505,8 @@ console.log("[generate-math] POST handler invoked");
     const system =
       "You are a careful STEM tutor. Generate high-quality multiple-choice (A–D) questions. " +
       "Use Markdown/LaTeX inside strings. Keep explanations brief (1–3 lines). " +
+      "LaTeX rules: (1) Put display-style math (integrals, sums, large fractions, \\displaystyle, \\bigl/\\bigr) inside double dollar signs $$...$$. " +
+      "(2) Put inline math inside single dollar signs $...$. (3) Do not put unescaped $ inside math (e.g. for dollar amounts use 'dollars' or put the amount outside math). " +
       'If a simple plot would help, include an optional "graph" object. ' +
       "Every question MUST include classification fields: area, subject, topic, and SHOULD include skillIds and difficulty when reasonable. " +
       `Allowed areas: ${AREAS.join(", ")}. Subjects must belong to area; topics must belong to subject.`;
@@ -500,7 +518,7 @@ console.log("[generate-math] POST handler invoked");
   "questions": [
     {
       "id": 1,
-      "stem_md": "...",
+      "stem_md": "Use $x^2$ for inline and $$\\\\displaystyle \\\\int_0^1 f(x)\\\\,dx$$ for display math.",
       "options": {"A":"...","B":"...","C":"...","D":"..."},
       "answer":"A",
       "explanation_md":"...",

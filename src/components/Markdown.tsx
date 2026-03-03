@@ -11,7 +11,7 @@ export function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
+      rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
       // If you need raw HTML inside markdown (usually not necessary for LaTeX), uncomment:
       // allowedElements={undefined}
       // disallowedElements={[]}
