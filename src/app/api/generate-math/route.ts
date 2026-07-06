@@ -10,7 +10,7 @@ import path from "node:path";
 // DeepSeek 通过 OpenAI SDK 兼容调用
 const deepseekClient = new OpenAI({
   baseURL: "https://api.deepseek.com",
-  apiKey: process.env.DEEPSEEK_API_KEY,
+  apiKey: process.env.DEEPSEEK_API_KEY ?? "not-configured",
 });
 
 async function callDeepSeek(messages: any[], max_tokens = 10000, model = "deepseek-reasoner") {
@@ -30,7 +30,7 @@ async function callDeepSeek(messages: any[], max_tokens = 10000, model = "deepse
   };
 }
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ?? "not-configured" });
 
 /* =============================== TAXONOMY (VCE-aligned) =============================== */
 // Top-level "areas" are the four VCE Mathematics studies
@@ -499,6 +499,14 @@ console.log("[generate-math] POST handler invoked");
     if (!prompt || prompt.trim().length < 5) {
       console.log("[generate-math] Invalid prompt, aborting.");
       return NextResponse.json({ error: "Please provide a brief description (≥5 chars)." }, { status: 400 });
+    }
+
+    const usingDeepSeek = model === "deepseek-chat" || model === "deepseek-reasoner";
+    if (usingDeepSeek && !process.env.DEEPSEEK_API_KEY) {
+      return NextResponse.json({ error: "Live question generation is not configured. Add DEEPSEEK_API_KEY to the server environment." }, { status: 503 });
+    }
+    if (!usingDeepSeek && !process.env.OPENAI_API_KEY) {
+      return NextResponse.json({ error: "Live question generation is not configured. Add OPENAI_API_KEY to the server environment." }, { status: 503 });
     }
 
     // --- Generation prompt (same shape you already had) ---
