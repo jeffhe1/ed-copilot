@@ -30,7 +30,7 @@ export async function POST(req: Request) {
           student = await prisma.student.update({
             where: { email },
             data: { authUserId, name: name || byEmail.name },
-            select: { id: true, name: true, email: true },
+            select: { id: true, name: true, email: true, authUserId: true },
           });
           console.log(`[ensure-student] Linked existing student by email: ${student.id}`);
         } else {
@@ -38,11 +38,11 @@ export async function POST(req: Request) {
             student = await prisma.student.update({
               where: { email },
               data: { name },
-              select: { id: true, name: true, email: true },
+              select: { id: true, name: true, email: true, authUserId: true },
             });
             console.log(`[ensure-student] Updated student name by email: ${student.id}`);
           } else {
-            student = { id: byEmail.id, name: byEmail.name, email: byEmail.email };
+            student = { id: byEmail.id, name: byEmail.name, email: byEmail.email, authUserId: byEmail.authUserId };
           }
           console.warn(
             `[ensure-student] Email match has different authUserId: ${byEmail.authUserId}`
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
         student = await prisma.student.update({
           where: { authUserId },
           data: { name },
-          select: { id: true, name: true, email: true },
+          select: { id: true, name: true, email: true, authUserId: true },
         });
         console.log(`[ensure-student] Updated student name for authUserId: ${student.id}`);
       } else {
@@ -115,7 +115,7 @@ export async function POST(req: Request) {
           email: finalEmail,
           name: finalName,
         },
-        select: { id: true, name: true, email: true },
+        select: { id: true, name: true, email: true, authUserId: true },
       });
       console.log(`[ensure-student] Successfully created student: ${student.id}`);
       return NextResponse.json({ student, created: true });
@@ -135,13 +135,13 @@ export async function POST(req: Request) {
             student = await prisma.student.update({
               where: { email: finalEmail },
               data: { authUserId, name: name || student.name },
-              select: { id: true, name: true, email: true },
+              select: { id: true, name: true, email: true, authUserId: true },
             });
           } else if (name && student.name !== name) {
             student = await prisma.student.update({
               where: { email: finalEmail },
               data: { name },
-              select: { id: true, name: true, email: true },
+              select: { id: true, name: true, email: true, authUserId: true },
             });
           }
           console.log(`[ensure-student] Found existing student by email: ${student.id}`);
@@ -152,7 +152,7 @@ export async function POST(req: Request) {
       // Try to find by authUserId one more time (race condition check)
       student = await prisma.student.findUnique({
         where: { authUserId },
-        select: { id: true, name: true, email: true },
+        select: { id: true, name: true, email: true, authUserId: true },
       });
       if (student) {
         console.log(`[ensure-student] Found student after error (race condition): ${student.id}`);
@@ -165,4 +165,3 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: e?.message ?? "Server error" }, { status: 500 });
   }
 }
-

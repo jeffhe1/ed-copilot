@@ -1,5 +1,5 @@
 import { EducationCopilotMvp } from "@/components/mvp/education-copilot-mvp";
 
-export default function Home() {
+export default function DemoPage() {
   return <EducationCopilotMvp />;
 }

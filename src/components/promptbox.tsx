@@ -211,9 +211,9 @@ function GraphRenderer({ graph }: { graph: GraphSpec }) {
       <Plot
         data={data as any}
         layout={{
-          title: graph.title ?? "",
-          xaxis: { title: graph.xLabel ?? "x" },
-          yaxis: { title: graph.yLabel ?? "y" },
+          title: { text: graph.title ?? "" },
+          xaxis: { title: { text: graph.xLabel ?? "x" } },
+          yaxis: { title: { text: graph.yLabel ?? "y" } },
           margin: { l: 40, r: 20, t: graph.title ? 40 : 10, b: 40 },
           autosize: true,
         }}
